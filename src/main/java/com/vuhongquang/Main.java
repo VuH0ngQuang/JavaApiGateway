@@ -11,10 +11,18 @@ import io.netty.channel.socket.nio.NioServerSocketChannel;
 import io.netty.handler.codec.http.HttpObjectAggregator;
 import io.netty.handler.codec.http.HttpServerCodec;
 
+import java.net.InetSocketAddress;
+import java.util.List;
+
 public class Main {
     public static void main(String[] args) throws InterruptedException {
         EventLoopGroup boss = new MultiThreadIoEventLoopGroup(NioIoHandler.newFactory());
         EventLoopGroup worker = new MultiThreadIoEventLoopGroup(NioIoHandler.newFactory());
+
+        final BackendPool pool = new BackendPool(List.of(
+                new Backend(new InetSocketAddress("localhost", 1500)),
+                new Backend(new InetSocketAddress("localhost", 1501))
+        ));
 
         try {
             ChannelFuture server = new ServerBootstrap()
@@ -26,7 +34,7 @@ public class Main {
                             ch.pipeline().addLast(
                                     new HttpServerCodec(),
                                     new HttpObjectAggregator(64*1024),
-                                    new BackendResponseHandler()
+                                    new BackendResponseHandler(pool)
                             );
                         }
                     })

@@ -14,10 +14,18 @@ public class BackendResponseHandler extends SimpleChannelInboundHandler<FullHttp
 
     private static final Logger log = LoggerFactory.getLogger(BackendResponseHandler.class);
 
+    private final BackendPool pool;
+
+    public BackendResponseHandler(BackendPool pool) {
+        this.pool = pool;
+    }
+
     @Override
     protected void channelRead0(ChannelHandlerContext ctx, FullHttpRequest msg) throws Exception {
         String clientIp = ((InetSocketAddress) ctx.channel().remoteAddress()).getAddress().getHostAddress();
         log.info("-> {} {} from {}", msg.method(), msg.uri(), clientIp);
+
+        Backend backend = pool.leastConnections();
 
         var request = new DefaultFullHttpRequest(
                 msg.protocolVersion(),
@@ -27,7 +35,7 @@ public class BackendResponseHandler extends SimpleChannelInboundHandler<FullHttp
                 msg.headers(),
                 msg.trailingHeaders()
         );
-        request.headers().set(HttpHeaderNames.HOST, "10.0.11.2");
+        request.headers().set(HttpHeaderNames.HOST, backend.address().getHostName());
         request.headers().set("X-Forwarded-For", clientIp);
 
         Bootstrap bootstrap = new Bootstrap();
@@ -45,11 +53,12 @@ public class BackendResponseHandler extends SimpleChannelInboundHandler<FullHttp
                                         log.info("<- {} ({} bytes)", msg.status(), msg.content().readableBytes());
                                         msg.retain();
                                         ctx.writeAndFlush(msg);
+                                        backend.decrementConnections();
                                     }
                                 });
                     }
                 });
-        bootstrap.connect("10.0.11.2", 1212).addListener( (ChannelFuture future) -> {
+        bootstrap.connect(backend.address().getHostName(), backend.address().getPort()).addListener( (ChannelFuture future) -> {
             if (future.isSuccess()) {
                 future.channel().writeAndFlush(request);
             } else {
@@ -60,6 +69,7 @@ public class BackendResponseHandler extends SimpleChannelInboundHandler<FullHttp
                 );
                 errRes.headers().set(HttpHeaderNames.CONTENT_LENGTH, 0);
                 request.release();
+                backend.decrementConnections();
                 ctx.writeAndFlush(errRes);
             }
         });

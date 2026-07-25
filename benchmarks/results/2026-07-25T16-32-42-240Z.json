@@ -1,0 +1,14 @@
+{
+  "timestamp": "2026-07-25T16:32:42.241Z",
+  "target": "http://localhost:1221/api/movies",
+  "vus": 20,
+  "duration": "15s",
+  "metrics": {
+    "requests_total": 2896,
+    "requests_per_sec": 182.61853681509754,
+    "failed_rate": 0,
+    "duration_avg_ms": 3.3956162872928144,
+    "duration_p95_ms": 6.25713,
+    "duration_max_ms": 1040.615169
+  }
+}
