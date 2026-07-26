@@ -1,5 +1,9 @@
 package com.vuhongquang;
 
+import com.vuhongquang.health.HealthChecker;
+import com.vuhongquang.loadbalancer.Backend;
+import com.vuhongquang.loadbalancer.BackendPool;
+import com.vuhongquang.loadbalancer.LeastConnectionsStrategy;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelInitializer;
@@ -19,10 +23,15 @@ public class Main {
         EventLoopGroup boss = new MultiThreadIoEventLoopGroup(NioIoHandler.newFactory());
         EventLoopGroup worker = new MultiThreadIoEventLoopGroup(NioIoHandler.newFactory());
 
-        final BackendPool pool = new BackendPool(List.of(
+        List<Backend> backends = List.of(
                 new Backend(new InetSocketAddress("localhost", 1500)),
                 new Backend(new InetSocketAddress("localhost", 1501))
-        ));
+        );
+
+        final BackendPool pool = new BackendPool(backends, new LeastConnectionsStrategy());
+        final HealthChecker healthChecker = new HealthChecker(backends, worker);
+
+        healthChecker.start();
 
         try {
             ChannelFuture server = new ServerBootstrap()

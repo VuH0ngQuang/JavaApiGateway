@@ -1,5 +1,7 @@
 package com.vuhongquang;
 
+import com.vuhongquang.loadbalancer.Backend;
+import com.vuhongquang.loadbalancer.BackendPool;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.channel.*;
 import io.netty.channel.socket.SocketChannel;
@@ -25,7 +27,18 @@ public class BackendResponseHandler extends SimpleChannelInboundHandler<FullHttp
         String clientIp = ((InetSocketAddress) ctx.channel().remoteAddress()).getAddress().getHostAddress();
         log.info("-> {} {} from {}", msg.method(), msg.uri(), clientIp);
 
-        Backend backend = pool.leastConnections();
+        Backend backend = pool.select();
+
+        if (backend == null) {
+            log.error("x- Failed to reach backend for {} {}: There is no healthy Backend", msg.method(), msg.uri());
+            var errRes = new DefaultFullHttpResponse(
+                    msg.protocolVersion(),
+                    HttpResponseStatus.SERVICE_UNAVAILABLE
+            );
+            errRes.headers().set(HttpHeaderNames.CONTENT_LENGTH, 0);
+            ctx.writeAndFlush(errRes);
+            return;
+        }
 
         var request = new DefaultFullHttpRequest(
                 msg.protocolVersion(),

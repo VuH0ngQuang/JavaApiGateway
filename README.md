@@ -6,14 +6,14 @@ distributed systems, and observability by building rather than reading about the
 
 ## Status
 
-Currently through **Week 3** of the roadmap.
+Currently through **Week 4** of the roadmap.
 
 | Week | Topic | Status |
 |------|-------|--------|
 | 1 | Netty Fundamentals (EventLoop, Channel, Pipeline, ByteBuf) | ✅ |
 | 2 | Reverse Proxy (forward method/headers/body to a backend) | ✅ |
 | 3 | Load Balancer (Round Robin, Least Connections, benchmarking) | ✅ |
-| 4 | Health Checks | ⬜ |
+| 4 | Health Checks (TCP-level probing, auto add/remove) | ✅ |
 | 5 | Connection Pooling | ⬜ |
 | 6+ | Auth, Rate Limiting, Resilience, Observability, ... | ⬜ |
 
@@ -24,25 +24,40 @@ Client
    |
 Netty HTTP Server (BackendResponseHandler)
    |
-BackendPool (Round Robin / Least Connections)
-   |
-   +---> Backend 1
-   +---> Backend 2
+BackendPool --- LoadBalancingStrategy (Round Robin / Least Connections)
+   |                     ^
+   |                     | filters to healthy only
+   +---> Backend 1  <-----+
+   +---> Backend 2  <-----+---- HealthChecker (TCP probe every 5s)
    +---> ...
 ```
 
-- **`Main`** — bootstraps the Netty server (`ServerBootstrap`, boss/worker `EventLoopGroup`s)
-  and binds to port `1221`.
+- **`Main`** — bootstraps the Netty server (`ServerBootstrap`, boss/worker `EventLoopGroup`s),
+  wires up the shared backend list, `BackendPool`, and `HealthChecker`, and binds to port `1221`.
 - **`BackendResponseHandler`** — receives each incoming `FullHttpRequest`, selects a backend
-  via `BackendPool`, opens an outbound Netty client connection (`Bootstrap`), forwards the
-  request (method, URI, headers, body — with `X-Forwarded-For` added), and relays the
-  backend's response back to the original client. Falls back to `502 Bad Gateway` if the
-  backend is unreachable.
-- **`BackendPool`** — holds the set of available `Backend`s and selects one per request:
-  - `next()` — Round Robin, cycles through backends in order.
-  - `leastConnections()` — picks the backend with the fewest currently in-flight requests.
-- **`Backend`** — wraps a backend's address with an atomic active-connection counter, used
-  by Least Connections.
+  via `BackendPool.select()`, opens an outbound Netty client connection (`Bootstrap`), forwards
+  the request (method, URI, headers, body — with `X-Forwarded-For` added), and relays the
+  backend's response back to the original client. Returns `503 Service Unavailable` if no
+  healthy backend exists, or `502 Bad Gateway` if the selected backend is unreachable.
+
+### `loadbalancer` package
+
+- **`BackendPool`** — holds the set of `Backend`s and a `LoadBalancingStrategy`; on `select()`,
+  filters to only healthy backends and delegates the actual pick to the strategy.
+- **`LoadBalancingStrategy`** (abstract) — Template Method base class: handles the shared
+  empty-pool/no-healthy-backend guard (logs and returns `null`), delegating the real
+  algorithm to `doSelect()`.
+  - **`RoundRobinStrategy`** — cycles through backends in order.
+  - **`LeastConnectionsStrategy`** — picks the backend with the fewest in-flight requests.
+- **`Backend`** — wraps a backend's address with an atomic active-connection counter (for
+  Least Connections) and a `volatile healthy` flag (for Health Checks).
+
+### `health` package
+
+- **`HealthChecker`** — every 5 seconds, attempts a bare TCP connection to each backend
+  (no HTTP path/auth involved, to stay agnostic of each backend's own health-endpoint
+  quirks). Marks a backend unhealthy on failure and healthy again on recovery, logging
+  only on state *transitions* (not every check) to avoid log spam.
 
 ## Running
 
