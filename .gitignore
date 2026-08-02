@@ -41,6 +41,7 @@ build/
 .claude
 .gitnexus
 .idea
+/docs
 AGENTS.md
 CLAUDE.md
 target.md

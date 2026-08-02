@@ -4,6 +4,7 @@ import com.vuhongquang.health.HealthChecker;
 import com.vuhongquang.loadbalancer.Backend;
 import com.vuhongquang.loadbalancer.BackendPool;
 import com.vuhongquang.loadbalancer.LeastConnectionsStrategy;
+import com.vuhongquang.routing.Router;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelInitializer;
@@ -16,6 +17,8 @@ import io.netty.handler.codec.http.HttpObjectAggregator;
 import io.netty.handler.codec.http.HttpServerCodec;
 
 import java.net.InetSocketAddress;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 
 public class Main {
@@ -23,15 +26,31 @@ public class Main {
         EventLoopGroup boss = new MultiThreadIoEventLoopGroup(NioIoHandler.newFactory());
         EventLoopGroup worker = new MultiThreadIoEventLoopGroup(NioIoHandler.newFactory());
 
-        List<Backend> backends = List.of(
-                new Backend(new InetSocketAddress("localhost", 1500)),
-                new Backend(new InetSocketAddress("localhost", 1501))
+        List<Backend> movieBackends = List.of(
+                new Backend(new InetSocketAddress("localhost", 8081)),
+                new Backend(new InetSocketAddress("localhost", 8082))
         );
 
-        final BackendPool pool = new BackendPool(backends, new LeastConnectionsStrategy());
-        final HealthChecker healthChecker = new HealthChecker(backends, worker);
+        List<Backend> todoBackends = List.of(
+                new Backend(new InetSocketAddress("localhost", 9081)),
+                new Backend(new InetSocketAddress("localhost", 9082)),
+                new Backend(new InetSocketAddress("localhost", 9083))
+        );
+
+        final BackendPool moviePool = new BackendPool(movieBackends, new LeastConnectionsStrategy());
+        final BackendPool todoPool = new BackendPool(todoBackends, new LeastConnectionsStrategy());
+
+        ArrayList<Backend> healthList = new ArrayList<>(todoBackends);
+        healthList.addAll(movieBackends);
+        final HealthChecker healthChecker = new HealthChecker(healthList, worker);
 
         healthChecker.start();
+
+        HashMap<String, BackendPool> routes = new HashMap<>();
+        routes.put("/api/movies", moviePool);
+        routes.put("/api/todos", todoPool);
+
+        Router router = new Router(routes);
 
         try {
             ChannelFuture server = new ServerBootstrap()
@@ -43,7 +62,7 @@ public class Main {
                             ch.pipeline().addLast(
                                     new HttpServerCodec(),
                                     new HttpObjectAggregator(64*1024),
-                                    new BackendResponseHandler(pool)
+                                    new BackendResponseHandler(router)
                             );
                         }
                     })

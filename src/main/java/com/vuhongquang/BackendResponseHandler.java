@@ -2,6 +2,7 @@ package com.vuhongquang;
 
 import com.vuhongquang.loadbalancer.Backend;
 import com.vuhongquang.loadbalancer.BackendPool;
+import com.vuhongquang.routing.Router;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.channel.*;
 import io.netty.channel.socket.SocketChannel;
@@ -16,16 +17,29 @@ public class BackendResponseHandler extends SimpleChannelInboundHandler<FullHttp
 
     private static final Logger log = LoggerFactory.getLogger(BackendResponseHandler.class);
 
-    private final BackendPool pool;
+    private final Router router;
 
-    public BackendResponseHandler(BackendPool pool) {
-        this.pool = pool;
+    public BackendResponseHandler(Router router) {
+        this.router = router;
     }
 
     @Override
     protected void channelRead0(ChannelHandlerContext ctx, FullHttpRequest msg) throws Exception {
         String clientIp = ((InetSocketAddress) ctx.channel().remoteAddress()).getAddress().getHostAddress();
         log.info("-> {} {} from {}", msg.method(), msg.uri(), clientIp);
+
+        BackendPool pool = router.match(msg.uri());
+
+        if (pool == null) {
+            log.error("x- Failed to reach backend for {} {}: There is no match uri Backend", msg.method(), msg.uri());
+            var errRes = new DefaultFullHttpResponse(
+                    msg.protocolVersion(),
+                    HttpResponseStatus.NOT_FOUND
+            );
+            errRes.headers().set(HttpHeaderNames.CONTENT_LENGTH, 0);
+            ctx.writeAndFlush(errRes);
+            return;
+        }
 
         Backend backend = pool.select();
 
