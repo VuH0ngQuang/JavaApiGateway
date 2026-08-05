@@ -1,0 +1,259 @@
+{
+  "run_info": {
+    "timestamp": "2026-08-05T14:50:00.000Z",
+    "target": "http://localhost:1221/api/movies/{0..999}",
+    "vus": 50,
+    "duration": "30s",
+    "build": "pooled + LruResponseCache",
+    "keyspace": 1000,
+    "distribution": "zipf",
+    "zipf_s": 1,
+    "measured_hit_rate": "61.8%",
+    "pool_config": {
+      "maxConnections": 2048,
+      "acquireTimeoutMs": 30000
+    },
+    "cache_config": {
+      "impl": "LruResponseCache",
+      "maxBytes": 134217728,
+      "ttlMs": 5000
+    },
+    "backends": [
+      "dummy_backend.py :8081 movies",
+      "dummy_backend.py :8082 movies"
+    ],
+    "backend_protocol": "HTTP/1.1 keep-alive",
+    "response_body_bytes": 1048576,
+    "aggregator_limit_bytes": 67108864,
+    "load_balancing": "LeastConnectionsStrategy",
+    "gateway_log_level": "WARN (com.vuhongquang.cache at INFO)",
+    "k6_script": "bench-keyspace.js \u2014 random URI over a keyspace, uniform or Zipf",
+    "notes": [
+      "Zipfian access, s=1.0. Measured hit rate 61.8% from the same 128 entries \u2014 4.8x the uniform result, because LRU keeps the hot set resident when access is skewed. This is the number that would justify (or not) building LFU as a second implementation.",
+      "Keyspace test: requests spread over 1000 distinct URIs (/api/movies/0 .. /api/movies/999), each returning a 1 MB body. Working set ~1 GB against a 128 MB cache, so the cache holds ~128 entries and eviction runs constantly.",
+      "Router.match uses uri::startsWith, so /api/movies/<n> routes to the movie pool without config changes; dummy_backend.py ignores the path and returns the same 1 MB body for every URI.",
+      "Both backends served traffic: a verification run measured a 3806/3285 split across :8081 and :8082 under LeastConnectionsStrategy.",
+      "Hit rate measured directly via ResponseCache.logStats(), scheduled every 10s in Main. Logback config put com.vuhongquang.cache at INFO and root at WARN so per-request logging did not distort throughput.",
+      "Cache held its budget exactly throughout: 128 entries / 134217728 bytes on every stats line.",
+      "NOT comparable to the 2026-08-05 single-URI run (3839.70 rps, ~100% hit rate): that one served one permanently-hot entry and never evicted. Throughput drops ~3x once the cache faces real pressure.",
+      "Every cache miss copies the 1 MB body twice \u2014 once in ByteBufUtil.getBytes, once in CachedResponse's defensive clone. At a 12.8% hit rate that is ~2 MB of copying per request and is a known cost of the current design."
+    ]
+  },
+  "raw": {
+    "root_group": {
+      "name": "",
+      "path": "",
+      "id": "d41d8cd98f00b204e9800998ecf8427e",
+      "groups": [],
+      "checks": [
+        {
+          "name": "status is 200",
+          "path": "::status is 200",
+          "id": "6210a8cd14cd70477eba5c5e4cb3fb5f",
+          "passes": 47813,
+          "fails": 0
+        }
+      ]
+    },
+    "options": {
+      "summaryTrendStats": [
+        "avg",
+        "min",
+        "med",
+        "max",
+        "p(90)",
+        "p(95)"
+      ],
+      "summaryTimeUnit": "",
+      "noColor": false
+    },
+    "state": {
+      "isStdOutTTY": false,
+      "isStdErrTTY": false,
+      "testRunDurationMs": 30021.919465
+    },
+    "metrics": {
+      "checks": {
+        "type": "rate",
+        "contains": "default",
+        "values": {
+          "rate": 1,
+          "passes": 47813,
+          "fails": 0
+        }
+      },
+      "http_req_tls_handshaking": {
+        "type": "trend",
+        "contains": "time",
+        "values": {
+          "p(95)": 0,
+          "avg": 0,
+          "min": 0,
+          "med": 0,
+          "max": 0,
+          "p(90)": 0
+        }
+      },
+      "data_received": {
+        "type": "counter",
+        "contains": "data",
+        "values": {
+          "count": 50142688425,
+          "rate": 1670202615.907257
+        }
+      },
+      "iterations": {
+        "type": "counter",
+        "contains": "default",
+        "values": {
+          "count": 47813,
+          "rate": 1592.6030331185555
+        }
+      },
+      "http_req_duration": {
+        "type": "trend",
+        "contains": "time",
+        "values": {
+          "p(90)": 59.3968172,
+          "p(95)": 72.937442,
+          "avg": 29.694465324618648,
+          "min": 1.261446,
+          "med": 25.020745,
+          "max": 209.463503
+        }
+      },
+      "http_req_failed": {
+        "type": "rate",
+        "contains": "default",
+        "values": {
+          "rate": 0,
+          "passes": 0,
+          "fails": 47813
+        },
+        "thresholds": {
+          "rate<1": {
+            "ok": true
+          }
+        }
+      },
+      "http_req_blocked": {
+        "type": "trend",
+        "contains": "time",
+        "values": {
+          "avg": 0.027469886327986043,
+          "min": 0.002309,
+          "med": 0.006767,
+          "max": 27.16498,
+          "p(90)": 0.013127600000000007,
+          "p(95)": 0.0177524
+        }
+      },
+      "iteration_duration": {
+        "type": "trend",
+        "contains": "time",
+        "values": {
+          "med": 26.633786,
+          "max": 211.509947,
+          "p(90)": 62.528563,
+          "p(95)": 76.872392,
+          "avg": 31.29044481676564,
+          "min": 1.384034
+        }
+      },
+      "http_req_sending": {
+        "type": "trend",
+        "contains": "time",
+        "values": {
+          "min": 0.006338,
+          "med": 0.017758,
+          "max": 73.954913,
+          "p(90)": 0.22158740000000024,
+          "p(95)": 3.2289254000000005,
+          "avg": 0.6859814578461915
+        }
+      },
+      "http_req_waiting": {
+        "values": {
+          "max": 129.175949,
+          "p(90)": 33.949992800000004,
+          "p(95)": 45.46019680000001,
+          "avg": 15.354203742224962,
+          "min": 0.304201,
+          "med": 10.90252
+        },
+        "type": "trend",
+        "contains": "time"
+      },
+      "http_req_receiving": {
+        "contains": "time",
+        "values": {
+          "max": 168.544789,
+          "p(90)": 33.586986800000005,
+          "p(95)": 43.590622800000006,
+          "avg": 13.654280124547657,
+          "min": 0.320682,
+          "med": 9.353496
+        },
+        "type": "trend"
+      },
+      "data_sent": {
+        "type": "counter",
+        "contains": "data",
+        "values": {
+          "count": 3964129,
+          "rate": 132041.15761556954
+        }
+      },
+      "vus": {
+        "contains": "default",
+        "values": {
+          "value": 50,
+          "min": 50,
+          "max": 50
+        },
+        "type": "gauge"
+      },
+      "vus_max": {
+        "type": "gauge",
+        "contains": "default",
+        "values": {
+          "value": 50,
+          "min": 50,
+          "max": 50
+        }
+      },
+      "http_req_duration{expected_response:true}": {
+        "contains": "time",
+        "values": {
+          "avg": 29.694465324618648,
+          "min": 1.261446,
+          "med": 25.020745,
+          "max": 209.463503,
+          "p(90)": 59.3968172,
+          "p(95)": 72.937442
+        },
+        "type": "trend"
+      },
+      "http_reqs": {
+        "type": "counter",
+        "contains": "default",
+        "values": {
+          "count": 47813,
+          "rate": 1592.6030331185555
+        }
+      },
+      "http_req_connecting": {
+        "type": "trend",
+        "contains": "time",
+        "values": {
+          "max": 2.006871,
+          "p(90)": 0,
+          "p(95)": 0,
+          "avg": 0.0010747019220714031,
+          "min": 0,
+          "med": 0
+        }
+      }
+    }
+  }
+}

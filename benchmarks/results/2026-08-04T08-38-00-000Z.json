@@ -1,0 +1,246 @@
+{
+  "run_info": {
+    "timestamp": "2026-08-04T08:38:00.000Z",
+    "target": "http://localhost:1221/api/movies",
+    "vus": 50,
+    "duration": "30s",
+    "build": "pooled \u2014 BackendResponseHandler borrows from ConnectionPool via ConnectionPoolManager",
+    "pool_config": {
+      "maxConnections": 2048,
+      "acquireTimeoutMs": 30000
+    },
+    "backends": [
+      "dummy_backend.py :8081 movies",
+      "dummy_backend.py :8082 movies"
+    ],
+    "backend_protocol": "HTTP/1.1 keep-alive",
+    "response_body_bytes": 65536,
+    "load_balancing": "LeastConnectionsStrategy",
+    "gateway_log_level": "WARN",
+    "k6_script": "bench.js \u2014 copy of gateway-load-test.js with sleep(0.1) removed",
+    "notes": [
+      "Client-side sleep removed so throughput is bounded by the gateway, not the load generator.",
+      "Response body is 65536 bytes of random data \u2014 the HttpObjectAggregator limit (64*1024) configured in Main.java and ConnectionPool.java.",
+      "dummy_backend.py was changed to protocol_version = 'HTTP/1.1' for this run; it previously defaulted to HTTP/1.0, which closes the connection after every response and leaves a connection pool nothing to reuse.",
+      "NOT comparable to the 2026-07-25 runs: those used sleep(0.1) (capping ~200 rps regardless of gateway speed), a ~40 byte body, and 20 VUs.",
+      "A no-pool arm was measured under identical conditions on the same day for reference: 345.99 rps, avg 36.22 ms, med 11.98 ms, p90 19.71 ms, p95 24.93 ms, max 2316.02 ms, 0% failed (20760 requests). Pooling gave 17.8x throughput and 4.5x lower average latency."
+    ]
+  },
+  "raw": {
+    "root_group": {
+      "id": "d41d8cd98f00b204e9800998ecf8427e",
+      "groups": [],
+      "checks": [
+        {
+          "fails": 0,
+          "name": "status is 200",
+          "path": "::status is 200",
+          "id": "6210a8cd14cd70477eba5c5e4cb3fb5f",
+          "passes": 185093
+        }
+      ],
+      "name": "",
+      "path": ""
+    },
+    "options": {
+      "summaryTrendStats": [
+        "avg",
+        "min",
+        "med",
+        "max",
+        "p(90)",
+        "p(95)"
+      ],
+      "summaryTimeUnit": "",
+      "noColor": false
+    },
+    "state": {
+      "testRunDurationMs": 30014.768754,
+      "isStdOutTTY": false,
+      "isStdErrTTY": false
+    },
+    "metrics": {
+      "http_reqs": {
+        "type": "counter",
+        "contains": "default",
+        "values": {
+          "count": 185093,
+          "rate": 6166.730835643472
+        }
+      },
+      "http_req_duration": {
+        "type": "trend",
+        "contains": "time",
+        "values": {
+          "p(95)": 17.188642199999997,
+          "avg": 7.960271766376882,
+          "min": 0.572016,
+          "med": 6.868273,
+          "max": 1098.813645,
+          "p(90)": 14.332141200000006
+        }
+      },
+      "http_req_tls_handshaking": {
+        "type": "trend",
+        "contains": "time",
+        "values": {
+          "avg": 0,
+          "min": 0,
+          "med": 0,
+          "max": 0,
+          "p(90)": 0,
+          "p(95)": 0
+        }
+      },
+      "checks": {
+        "type": "rate",
+        "contains": "default",
+        "values": {
+          "rate": 1,
+          "passes": 185093,
+          "fails": 0
+        }
+      },
+      "http_req_waiting": {
+        "values": {
+          "avg": 7.750803742183702,
+          "min": 0.487607,
+          "med": 6.670091,
+          "max": 1098.456695,
+          "p(90)": 14.0757954,
+          "p(95)": 16.8888028
+        },
+        "type": "trend",
+        "contains": "time"
+      },
+      "http_req_duration{expected_response:true}": {
+        "type": "trend",
+        "contains": "time",
+        "values": {
+          "med": 6.868273,
+          "max": 1098.813645,
+          "p(90)": 14.332141200000006,
+          "p(95)": 17.188642199999997,
+          "avg": 7.960271766376882,
+          "min": 0.572016
+        }
+      },
+      "iteration_duration": {
+        "type": "trend",
+        "contains": "time",
+        "values": {
+          "p(90)": 14.46810040000001,
+          "p(95)": 17.333692399999993,
+          "avg": 8.087290443269108,
+          "min": 0.636769,
+          "med": 6.988997,
+          "max": 1098.96894
+        }
+      },
+      "http_req_blocked": {
+        "values": {
+          "avg": 0.0057517094811797035,
+          "min": 0.001686,
+          "med": 0.003394,
+          "max": 6.915842,
+          "p(90)": 0.005672,
+          "p(95)": 0.008572399999999994
+        },
+        "type": "trend",
+        "contains": "time"
+      },
+      "http_req_failed": {
+        "type": "rate",
+        "contains": "default",
+        "values": {
+          "rate": 0,
+          "passes": 0,
+          "fails": 185093
+        },
+        "thresholds": {
+          "rate<1": {
+            "ok": true
+          }
+        }
+      },
+      "http_req_receiving": {
+        "type": "trend",
+        "contains": "time",
+        "values": {
+          "p(90)": 0.28188520000000034,
+          "p(95)": 0.5340671999999999,
+          "avg": 0.18389969326770625,
+          "min": 0.035565,
+          "med": 0.08083,
+          "max": 32.58792
+        }
+      },
+      "data_received": {
+        "type": "counter",
+        "contains": "data",
+        "values": {
+          "count": 12157463519,
+          "rate": 405049381.47757024
+        }
+      },
+      "vus": {
+        "type": "gauge",
+        "contains": "default",
+        "values": {
+          "value": 50,
+          "min": 50,
+          "max": 50
+        }
+      },
+      "http_req_connecting": {
+        "type": "trend",
+        "contains": "time",
+        "values": {
+          "p(95)": 0,
+          "avg": 8.892900325782175e-05,
+          "min": 0,
+          "med": 0,
+          "max": 0.929787,
+          "p(90)": 0
+        }
+      },
+      "http_req_sending": {
+        "type": "trend",
+        "contains": "time",
+        "values": {
+          "p(90)": 0.020441,
+          "p(95)": 0.04417259999999998,
+          "avg": 0.025568330925535003,
+          "min": 0.004819,
+          "med": 0.009261,
+          "max": 20.937866
+        }
+      },
+      "iterations": {
+        "type": "counter",
+        "contains": "default",
+        "values": {
+          "count": 185093,
+          "rate": 6166.730835643472
+        }
+      },
+      "vus_max": {
+        "type": "gauge",
+        "contains": "default",
+        "values": {
+          "value": 50,
+          "min": 50,
+          "max": 50
+        }
+      },
+      "data_sent": {
+        "type": "counter",
+        "contains": "data",
+        "values": {
+          "count": 14807440,
+          "rate": 493338.4668514778
+        }
+      }
+    }
+  }
+}

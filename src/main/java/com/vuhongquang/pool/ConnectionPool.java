@@ -92,7 +92,7 @@ public class ConnectionPool {
                     protected void initChannel(SocketChannel ch) {
                         ch.pipeline().addLast(
                                 new HttpClientCodec(),
-                                new HttpObjectAggregator(64 * 1024)
+                                new HttpObjectAggregator(64 * 1024 * 1024)
                         );
                     }
                 });

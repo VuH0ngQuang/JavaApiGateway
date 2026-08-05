@@ -1,6 +1,7 @@
 package com.vuhongquang.loadbalancer;
 
 import java.net.InetSocketAddress;
+import java.util.Objects;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class Backend {
@@ -18,4 +19,16 @@ public class Backend {
     public void decrementConnections() {activeConnections.decrementAndGet();}
     public boolean isHealthy() {return healthy;}
     public void setHealthy(boolean healthy) {this.healthy = healthy;}
+
+    @Override
+    public int hashCode() {
+        return Objects.hashCode(address);
+    }
+
+    @Override
+    public boolean equals(Object obj) {
+        if (this == obj) return true;
+        if (!(obj instanceof Backend)) return false;
+        return Objects.equals(address, ((Backend) obj).address);
+    }
 }
