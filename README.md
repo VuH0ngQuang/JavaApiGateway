@@ -103,9 +103,43 @@ Note that higher hit rate does **not** mean uniformly better latency here — ma
 slightly *worse* under Zipf (209 ms vs 199 ms). Cache misses still pay two 1 MB copies,
 and a burst of them can land together.
 
+### Two rate limiters, same rate, very different behaviour
+
+Both configured for the same sustained rate of **120 requests/min per IP**, then hit with
+a burst of 250 requests from one client. This measures *behaviour*, not throughput.
+
+```mermaid
+%%{init: {"themeVariables": {"xyChart": {"plotColorPalette": "#256abf"}}}}%%
+xychart-beta
+    title "Requests admitted from a 250-request burst"
+    x-axis ["Token bucket", "Sliding window"]
+    y-axis "requests allowed" 0 --> 250
+    bar [206, 120]
+```
+
+| | Token bucket (200 burst, 2/sec) | Sliding window (120 / 60s) |
+|---|---|---|
+| Allowed | 206 | **120** |
+| Rejected (429) | 44 | 130 |
+| Sustained rate | 120/min | 120/min |
+| Burst allowance | 200 banked tokens | none |
+| State per active IP | 2 fields | 120 boxed timestamps |
+
+**Token bucket banks unused capacity.** 200 tokens were available, so 200 requests passed
+instantly — plus ~6 that refilled during the ~3 seconds the burst took. It forgives a
+spike, then throttles smoothly.
+
+**Sliding window enforces a hard ceiling.** Never more than 120 in any 60-second stretch,
+exact to the request, no burst allowance. Capacity returns in lumps as old timestamps age
+out rather than trickling back.
+
+Neither is "better" — bucket suits traffic that is naturally spiky but bounded overall;
+window suits a limit you have to be able to state contractually. The cost of the window's
+exactness is memory: one timestamp per request in flight, versus two fields.
+
 ## Status
 
-Currently through **Week 6** of the roadmap.
+Currently through **Week 7** of the roadmap.
 
 | Week | Topic | Status |
 |------|-------|--------|
@@ -115,7 +149,8 @@ Currently through **Week 6** of the roadmap.
 | 4 | Health Checks (TCP-level probing, auto add/remove) | ✅ |
 | 5 | Connection Pooling (keep-alive reuse, waiter queue, acquire timeout) | ✅ |
 | 6 | Response Caching (LRU, byte-budgeted, TTL) | ✅ |
-| 7+ | Rate Limiting, Resilience, Observability, ... | ⬜ |
+| 7 | Rate Limiting (token bucket + sliding window, per IP) | ✅ |
+| 8+ | Resilience, Observability, Dynamic Config, ... | ⬜ |
 
 Path-based routing (Week 10 territory) also landed early, alongside Week 5.
 

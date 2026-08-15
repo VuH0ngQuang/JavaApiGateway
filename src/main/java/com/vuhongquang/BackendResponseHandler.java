@@ -6,6 +6,7 @@ import com.vuhongquang.loadbalancer.Backend;
 import com.vuhongquang.loadbalancer.BackendPool;
 import com.vuhongquang.pool.ConnectionPool;
 import com.vuhongquang.pool.ConnectionPoolManager;
+import com.vuhongquang.ratelimit.RateLimiter;
 import com.vuhongquang.routing.Router;
 import io.netty.buffer.ByteBufUtil;
 import io.netty.buffer.Unpooled;
@@ -23,17 +24,22 @@ public class BackendResponseHandler extends SimpleChannelInboundHandler<FullHttp
 
     private static final Logger log = LoggerFactory.getLogger(BackendResponseHandler.class);
 
+    private static final int RETRY_AFTER_SECONDS = 60;
+
     private final Router router;
     private final ConnectionPoolManager manager;
     private final ResponseCache cache;
+    private final RateLimiter limiter;
 
     public BackendResponseHandler(
             Router router,
             ConnectionPoolManager manager,
-            ResponseCache cache) {
+            ResponseCache cache,
+            RateLimiter limiter) {
         this.router = router;
         this.manager = manager;
         this.cache = cache;
+        this.limiter = limiter;
     }
 
     @Override
@@ -41,6 +47,26 @@ public class BackendResponseHandler extends SimpleChannelInboundHandler<FullHttp
         String clientIp = ((InetSocketAddress) ctx.channel().remoteAddress()).getAddress().getHostAddress();
         log.info("-> {} {} from {}", msg.method(), msg.uri(), clientIp);
 
+        final HttpVersion clientVersion = msg.protocolVersion();
+
+        //rate limit
+        limiter.tryAcquire(clientIp).addListener((Future<Boolean> f) -> {
+            if (!f.isSuccess()) {
+                log.error("x- Rate limiter failed for {} on {} {}, allowing request: {}", clientIp, msg.method(), msg.uri(), f.cause().toString());
+            } else if (Boolean.FALSE.equals(f.getNow())) {
+                log.warn("x- Rate limited {} for {} {}", clientIp, msg.method(), msg.uri());
+                var res = new DefaultFullHttpResponse(clientVersion, HttpResponseStatus.TOO_MANY_REQUESTS);
+                res.headers().set(HttpHeaderNames.RETRY_AFTER, RETRY_AFTER_SECONDS);
+                res.headers().set(HttpHeaderNames.CONTENT_LENGTH, 0);
+                ctx.writeAndFlush(res);
+                return;
+            }
+            forward(ctx, msg, clientIp);
+        });
+    }
+
+    private void forward(ChannelHandlerContext ctx, FullHttpRequest msg, String clientIp) {
+        //check cache for GET
         boolean cacheable = HttpMethod.GET.equals(msg.method());
 
         if (cacheable) {
@@ -62,6 +88,7 @@ public class BackendResponseHandler extends SimpleChannelInboundHandler<FullHttp
             }
         }
 
+        //start request pool for calling to backend and return
         BackendPool pool = router.match(msg.uri());
 
         if (pool == null) {
@@ -99,6 +126,7 @@ public class BackendResponseHandler extends SimpleChannelInboundHandler<FullHttp
                 Throwable cause = future.cause();
                 request.release();
                 backend.decrementConnections();
+                backend.getBreaker().recordFailure();
                 if (cause instanceof TimeoutException) {
                     log.error("x- Pool at capacity for backend {} on {} {}: {}",
                             backend.address(), method, uri, cause.toString());
@@ -128,7 +156,7 @@ public class BackendResponseHandler extends SimpleChannelInboundHandler<FullHttp
                                 cache.put(uri, res.status(), body, res.headers());
                             }
                             ctx.writeAndFlush(res);
-                            finishExchange(done, backend, connectionPool, ch, this);
+                            finishExchange(done, backend, connectionPool, ch, this, true);
                         }
 
                         @Override
@@ -136,7 +164,7 @@ public class BackendResponseHandler extends SimpleChannelInboundHandler<FullHttp
                             log.error("x- Backend {} closed connection before responding to {} {}",
                                     backend.address(), method, uri);
                             sendError(ctx, version, HttpResponseStatus.BAD_GATEWAY);
-                            finishExchange(done, backend, connectionPool, ch, this);
+                            finishExchange(done, backend, connectionPool, ch, this, false);
                         }
 
                         @Override
@@ -144,7 +172,7 @@ public class BackendResponseHandler extends SimpleChannelInboundHandler<FullHttp
                             log.error("x- Error from backend {} for {} {}: {}",
                                     backend.address(), method, uri, cause.toString());
                             sendError(ctx, version, HttpResponseStatus.BAD_GATEWAY);
-                            finishExchange(done, backend, connectionPool, ch, this);
+                            finishExchange(done, backend, connectionPool, ch, this, false);
                         }
                     };
 
@@ -155,7 +183,7 @@ public class BackendResponseHandler extends SimpleChannelInboundHandler<FullHttp
                     log.error("x- Failed to send request to backend {} for {} {}: {}",
                             backend.address(), method, uri, wf.cause().toString());
                     sendError(ctx, version, HttpResponseStatus.BAD_GATEWAY);
-                    finishExchange(done, backend, connectionPool, ch, responseHandler);
+                    finishExchange(done, backend, connectionPool, ch, responseHandler, false);
                 }
             });
         });
@@ -167,9 +195,14 @@ public class BackendResponseHandler extends SimpleChannelInboundHandler<FullHttp
         ctx.writeAndFlush(errRes);
     }
 
-    private static void finishExchange(AtomicBoolean done, Backend backend, ConnectionPool pool, Channel ch, ChannelHandler handler) {
+    private static void finishExchange(AtomicBoolean done, Backend backend, ConnectionPool pool, Channel ch, ChannelHandler handler, boolean success) {
         if (!done.compareAndSet(false, true)) {
             return;
+        }
+        if (success) {
+            backend.getBreaker().recordSuccess();
+        } else {
+            backend.getBreaker().recordFailure();
         }
         backend.decrementConnections();
         if (ch.pipeline().context(handler) != null) {

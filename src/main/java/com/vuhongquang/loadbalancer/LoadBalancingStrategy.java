@@ -14,12 +14,20 @@ public abstract class LoadBalancingStrategy {
             log.error("Backend pool is empty: ");
             return null;
         } else {
-            var healthyBackends = backends.stream().filter(Backend::isHealthy).toList();
+            var healthyBackends = backends.stream()
+                    .filter(Backend::isHealthy)
+                    .filter(b -> b.getBreaker().isAvailable())
+                    .toList();
             if (isEmpty(healthyBackends)) {
                 log.error("There is no healthy Backend");
                 return null;
             }
-            return doSelect(healthyBackends);
+            Backend chosen =  doSelect(healthyBackends);
+            if (chosen != null && !chosen.getBreaker().allowRequest()) {
+                return null;
+            }
+            if (chosen != null) chosen.incrementConnections();
+            return chosen;
         }
     }
 

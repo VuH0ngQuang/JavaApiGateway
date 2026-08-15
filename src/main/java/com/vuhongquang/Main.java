@@ -7,6 +7,8 @@ import com.vuhongquang.loadbalancer.Backend;
 import com.vuhongquang.loadbalancer.BackendPool;
 import com.vuhongquang.loadbalancer.LeastConnectionsStrategy;
 import com.vuhongquang.pool.ConnectionPoolManager;
+import com.vuhongquang.ratelimit.slidingwindow.SlidingWindowLimiter;
+import com.vuhongquang.resilience.CircuitBreaker;
 import com.vuhongquang.routing.Router;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.channel.ChannelFuture;
@@ -30,7 +32,6 @@ public class Main {
         EventLoopGroup boss = new MultiThreadIoEventLoopGroup(NioIoHandler.newFactory());
         EventLoopGroup worker = new MultiThreadIoEventLoopGroup(NioIoHandler.newFactory());
 
-
         final int MAXCONNECTION = 2048;
         final int ACQUIRETIMEOUTMS = 30000;
         final ResponseCache cache = new LruResponseCache(128 * 1024L * 1024L, 5000);
@@ -38,14 +39,29 @@ public class Main {
         worker.scheduleAtFixedRate(cache::logStats, 10, 10, TimeUnit.SECONDS);
 
         List<Backend> movieBackends = List.of(
-                new Backend(new InetSocketAddress("localhost", 8081)),
-                new Backend(new InetSocketAddress("localhost", 8082))
+                new Backend(
+                        new InetSocketAddress("localhost", 8081),
+                        new CircuitBreaker(5000, 0.5, 10, 20)
+                ),
+                new Backend(
+                        new InetSocketAddress("localhost", 8082),
+                        new CircuitBreaker(5000, 0.5, 10, 20)
+                )
         );
 
         List<Backend> todoBackends = List.of(
-                new Backend(new InetSocketAddress("localhost", 9081)),
-                new Backend(new InetSocketAddress("localhost", 9082)),
-                new Backend(new InetSocketAddress("localhost", 9083))
+                new Backend(
+                        new InetSocketAddress("localhost", 9081),
+                        new CircuitBreaker(5000, 0.5, 10, 20)
+                ),
+                new Backend(
+                        new InetSocketAddress("localhost", 9082),
+                        new CircuitBreaker(5000, 0.5, 10, 20)
+                ),
+                new Backend(
+                        new InetSocketAddress("localhost", 9083),
+                        new CircuitBreaker(5000, 0.5, 10, 20)
+                )
         );
 
         final BackendPool moviePool = new BackendPool(movieBackends, new LeastConnectionsStrategy());
@@ -67,6 +83,9 @@ public class Main {
         backends.addAll(todoBackends);
         ConnectionPoolManager manager = new ConnectionPoolManager(backends, worker, MAXCONNECTION, ACQUIRETIMEOUTMS);
 
+        final SlidingWindowLimiter limiter = new SlidingWindowLimiter(120, 60_000, 60_000, worker);
+        limiter.start();
+
         try {
             ChannelFuture server = new ServerBootstrap()
                     .group(boss,worker)
@@ -77,7 +96,7 @@ public class Main {
                             ch.pipeline().addLast(
                                     new HttpServerCodec(),
                                     new HttpObjectAggregator(64 * 1024 * 1024),
-                                    new BackendResponseHandler(router, manager, cache)
+                                    new BackendResponseHandler(router, manager, cache, limiter)
                             );
                         }
                     })

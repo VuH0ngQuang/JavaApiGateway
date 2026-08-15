@@ -14,7 +14,6 @@ public class LeastConnectionsStrategy extends LoadBalancingStrategy{
             }
             i++;
         }
-        be.incrementConnections();
         return be;
     }
 }

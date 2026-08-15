@@ -1,16 +1,20 @@
 package com.vuhongquang.loadbalancer;
 
+import com.vuhongquang.resilience.CircuitBreaker;
+
 import java.net.InetSocketAddress;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class Backend {
     private final InetSocketAddress address;
+    private final CircuitBreaker breaker;
     private final AtomicInteger activeConnections = new AtomicInteger(0);
     private volatile boolean healthy = true;
 
-    public Backend(InetSocketAddress address) {
+    public Backend(InetSocketAddress address, CircuitBreaker breaker) {
         this.address = address;
+        this.breaker = breaker;
     }
 
     public InetSocketAddress address() {return address;}
@@ -19,6 +23,7 @@ public class Backend {
     public void decrementConnections() {activeConnections.decrementAndGet();}
     public boolean isHealthy() {return healthy;}
     public void setHealthy(boolean healthy) {this.healthy = healthy;}
+    public CircuitBreaker getBreaker() {return breaker;}
 
     @Override
     public int hashCode() {

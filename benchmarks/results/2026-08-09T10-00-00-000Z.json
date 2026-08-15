@@ -1,0 +1,50 @@
+{
+  "run_info": {
+    "timestamp": "2026-08-09T10:00:00.000Z",
+    "target": "http://localhost:1221/api/movies",
+    "test": "rate limiter algorithm comparison",
+    "method": "250 sequential curl requests from one client IP, issued as fast as a shell loop allows (~3s wall clock, so ~6 tokens accrue during a token-bucket run)",
+    "response_body_bytes": 1024,
+    "gateway_log_level": "WARN",
+    "notes": [
+      "Not a throughput benchmark. This measures rate limiter BEHAVIOUR \u2014 how many requests each algorithm admits from a burst \u2014 not requests/sec.",
+      "Both algorithms allow the same sustained rate of 120 requests/min. They differ entirely in how they treat a burst.",
+      "Token bucket banks unused capacity: 200 tokens sat available, so 200 requests passed instantly, plus ~6 that refilled during the ~3.2s the burst took.",
+      "Sliding window enforces a hard ceiling over any 60s stretch: exactly 120 admitted, no burst allowance, exact to the request.",
+      "The sliding window result was reproduced after waiting 65s for the window to clear \u2014 120/130 both times.",
+      "Memory cost differs sharply: sliding window stores one boxed Long timestamp per request in the window (120 per active IP), token bucket stores two fields. This is the argument for the sliding-window COUNTER variant at scale.",
+      "Both limiters key on the socket address. Behind a load balancer every request would appear to come from one IP and the whole internet would share a single limit \u2014 X-Forwarded-For handling is not implemented."
+    ]
+  },
+  "results": {
+    "token_bucket": {
+      "config": {
+        "maxToken": 200,
+        "refillRate": 2,
+        "intervalMs": 1000,
+        "sustained_per_min": 120
+      },
+      "requests_sent": 250,
+      "allowed_200": 206,
+      "rejected_429": 44,
+      "burst_duration_ms": 3204
+    },
+    "sliding_window": {
+      "config": {
+        "limit": 120,
+        "windowSizeMs": 60000,
+        "sweepIntervalMs": 60000,
+        "sustained_per_min": 120
+      },
+      "requests_sent": 250,
+      "allowed_200": 120,
+      "rejected_429": 130,
+      "burst_duration_ms": 2965
+    }
+  },
+  "response_headers_on_429": {
+    "status": "HTTP/1.1 429 Too Many Requests",
+    "retry-after": "60",
+    "content-length": "0"
+  }
+}
