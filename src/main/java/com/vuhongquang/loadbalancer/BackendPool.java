@@ -3,7 +3,9 @@ package com.vuhongquang.loadbalancer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 public class BackendPool {
 
@@ -17,7 +19,15 @@ public class BackendPool {
         this.strategy = strategy;
     }
 
+    public Backend select(Set<Backend> excluded) {
+        return strategy.select(backends, excluded);
+    }
+
     public Backend select() {
-        return strategy.select(backends);
+        return strategy.select(backends, new HashSet<>());
+    }
+
+    public int size() {
+        return backends.size();
     }
 }

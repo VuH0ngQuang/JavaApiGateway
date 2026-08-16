@@ -17,13 +17,14 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.net.InetSocketAddress;
+import java.util.LinkedHashSet;
+import java.util.Set;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public class BackendResponseHandler extends SimpleChannelInboundHandler<FullHttpRequest> {
 
     private static final Logger log = LoggerFactory.getLogger(BackendResponseHandler.class);
-
     private static final int RETRY_AFTER_SECONDS = 60;
 
     private final Router router;
@@ -87,21 +88,56 @@ public class BackendResponseHandler extends SimpleChannelInboundHandler<FullHttp
                 return;
             }
         }
+        LinkedHashSet<Backend> triedBackend = new LinkedHashSet<>();
+        msg.retain();
+        attemptRequest(ctx, msg, clientIp, cacheable, 3, triedBackend);
+    }
 
+    private static void sendError(ChannelHandlerContext ctx, FullHttpRequest msg, HttpResponseStatus status) {
+        var errRes = new DefaultFullHttpResponse(msg.protocolVersion(), status);
+        msg.release();
+        errRes.headers().set(HttpHeaderNames.CONTENT_LENGTH, 0);
+        ctx.writeAndFlush(errRes);
+    }
+
+    private static void finishExchange(AtomicBoolean done, Backend backend, ConnectionPool pool, Channel ch, ChannelHandler handler, boolean success) {
+        if (!done.compareAndSet(false, true)) {
+            return;
+        }
+        if (success) {
+            backend.getBreaker().recordSuccess();
+        } else {
+            backend.getBreaker().recordFailure();
+        }
+        backend.decrementConnections();
+        if (ch.pipeline().context(handler) != null) {
+            ch.pipeline().remove(handler);
+        }
+        pool.release(ch);
+    }
+
+    private void attemptRequest(ChannelHandlerContext ctx, FullHttpRequest msg, String clientIp, boolean cacheable, int attemptsLeft, Set<Backend> triedBackend) {
         //start request pool for calling to backend and return
         BackendPool pool = router.match(msg.uri());
 
         if (pool == null) {
             log.error("x- Failed to reach backend for {} {}: There is no match uri Backend", msg.method(), msg.uri());
-            sendError(ctx, msg.protocolVersion(), HttpResponseStatus.NOT_FOUND);
+            sendError(ctx, msg, HttpResponseStatus.NOT_FOUND);
             return;
         }
 
-        Backend backend = pool.select();
+        Backend backend = pool.select(triedBackend);
+        triedBackend.add(backend);
+
+        if (pool.size() == triedBackend.size()) {
+            var it = triedBackend.iterator();
+            it.next();
+            it.remove();
+        }
 
         if (backend == null) {
             log.error("x- Failed to reach backend for {} {}: There is no healthy Backend", msg.method(), msg.uri());
-            sendError(ctx, msg.protocolVersion(), HttpResponseStatus.SERVICE_UNAVAILABLE);
+            sendError(ctx, msg, HttpResponseStatus.SERVICE_UNAVAILABLE);
             return;
         }
 
@@ -116,7 +152,6 @@ public class BackendResponseHandler extends SimpleChannelInboundHandler<FullHttp
         request.headers().set(HttpHeaderNames.HOST, backend.address().getHostName());
         request.headers().set("X-Forwarded-For", clientIp);
 
-        final HttpVersion version = msg.protocolVersion();
         final HttpMethod method = msg.method();
         final String uri = msg.uri();
 
@@ -127,14 +162,18 @@ public class BackendResponseHandler extends SimpleChannelInboundHandler<FullHttp
                 request.release();
                 backend.decrementConnections();
                 backend.getBreaker().recordFailure();
+                if (attemptsLeft > 1) {
+                    attemptRequest(ctx, msg, clientIp, cacheable, attemptsLeft - 1, triedBackend);
+                    return;
+                }
                 if (cause instanceof TimeoutException) {
                     log.error("x- Pool at capacity for backend {} on {} {}: {}",
                             backend.address(), method, uri, cause.toString());
-                    sendError(ctx, version, HttpResponseStatus.GATEWAY_TIMEOUT);
+                    sendError(ctx, msg, HttpResponseStatus.GATEWAY_TIMEOUT);
                 } else {
                     log.error("x- Failed to connect to backend {} for {} {}: {}",
                             backend.address(), method, uri, cause.toString());
-                    sendError(ctx, version, HttpResponseStatus.BAD_GATEWAY);
+                    sendError(ctx, msg, HttpResponseStatus.BAD_GATEWAY);
                 }
                 return;
             }
@@ -156,6 +195,7 @@ public class BackendResponseHandler extends SimpleChannelInboundHandler<FullHttp
                                 cache.put(uri, res.status(), body, res.headers());
                             }
                             ctx.writeAndFlush(res);
+                            msg.release();
                             finishExchange(done, backend, connectionPool, ch, this, true);
                         }
 
@@ -163,7 +203,7 @@ public class BackendResponseHandler extends SimpleChannelInboundHandler<FullHttp
                         public void channelInactive(ChannelHandlerContext backendCtx) {
                             log.error("x- Backend {} closed connection before responding to {} {}",
                                     backend.address(), method, uri);
-                            sendError(ctx, version, HttpResponseStatus.BAD_GATEWAY);
+                            sendError(ctx, msg, HttpResponseStatus.BAD_GATEWAY);
                             finishExchange(done, backend, connectionPool, ch, this, false);
                         }
 
@@ -171,43 +211,20 @@ public class BackendResponseHandler extends SimpleChannelInboundHandler<FullHttp
                         public void exceptionCaught(ChannelHandlerContext backendCtx, Throwable cause) {
                             log.error("x- Error from backend {} for {} {}: {}",
                                     backend.address(), method, uri, cause.toString());
-                            sendError(ctx, version, HttpResponseStatus.BAD_GATEWAY);
+                            sendError(ctx, msg, HttpResponseStatus.BAD_GATEWAY);
                             finishExchange(done, backend, connectionPool, ch, this, false);
                         }
                     };
 
             ch.pipeline().addLast("response", responseHandler);
-
             ch.writeAndFlush(request).addListener((ChannelFuture wf) -> {
                 if (!wf.isSuccess()) {
                     log.error("x- Failed to send request to backend {} for {} {}: {}",
                             backend.address(), method, uri, wf.cause().toString());
-                    sendError(ctx, version, HttpResponseStatus.BAD_GATEWAY);
+                    sendError(ctx, msg, HttpResponseStatus.BAD_GATEWAY);
                     finishExchange(done, backend, connectionPool, ch, responseHandler, false);
                 }
             });
         });
-    }
-
-    private static void sendError(ChannelHandlerContext ctx, HttpVersion version, HttpResponseStatus status) {
-        var errRes = new DefaultFullHttpResponse(version, status);
-        errRes.headers().set(HttpHeaderNames.CONTENT_LENGTH, 0);
-        ctx.writeAndFlush(errRes);
-    }
-
-    private static void finishExchange(AtomicBoolean done, Backend backend, ConnectionPool pool, Channel ch, ChannelHandler handler, boolean success) {
-        if (!done.compareAndSet(false, true)) {
-            return;
-        }
-        if (success) {
-            backend.getBreaker().recordSuccess();
-        } else {
-            backend.getBreaker().recordFailure();
-        }
-        backend.decrementConnections();
-        if (ch.pipeline().context(handler) != null) {
-            ch.pipeline().remove(handler);
-        }
-        pool.release(ch);
     }
 }

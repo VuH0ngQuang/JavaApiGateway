@@ -1,18 +1,22 @@
 package com.vuhongquang.loadbalancer;
 
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class LeastConnectionsStrategy extends LoadBalancingStrategy{
+
+    private final AtomicInteger index = new AtomicInteger(0);
+
     @Override
     protected Backend doSelect(List<Backend> backends) {
-        Backend be = backends.getFirst();
-        int i = 1;
-        while (i != backends.size()) {
-            var temp = backends.get(i);
+        int size = backends.size();
+        int start = index.getAndIncrement() % size;
+        Backend be = backends.get(start);
+        for (int offset = 1; offset < size; offset++) {
+            var temp = backends.get((start + offset) % size);
             if (temp.activeConnections() < be.activeConnections()) {
                 be = temp;
             }
-            i++;
         }
         return be;
     }

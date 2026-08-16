@@ -4,17 +4,19 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.List;
+import java.util.Set;
 
 public abstract class LoadBalancingStrategy {
 
     public static final Logger log = LoggerFactory.getLogger(LoadBalancingStrategy.class);
 
-    public final Backend select(List<Backend> backends) {
+    public final Backend select(List<Backend> backends, Set<Backend> excluded) {
         if (isEmpty(backends)) {
             log.error("Backend pool is empty: ");
             return null;
         } else {
             var healthyBackends = backends.stream()
+                    .filter(b -> !excluded.contains(b))
                     .filter(Backend::isHealthy)
                     .filter(b -> b.getBreaker().isAvailable())
                     .toList();
