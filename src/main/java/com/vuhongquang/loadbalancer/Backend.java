@@ -1,6 +1,8 @@
 package com.vuhongquang.loadbalancer;
 
 import com.vuhongquang.resilience.CircuitBreaker;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Tags;
 
 import java.net.InetSocketAddress;
 import java.util.Objects;
@@ -12,9 +14,21 @@ public class Backend {
     private final AtomicInteger activeConnections = new AtomicInteger(0);
     private volatile boolean healthy = true;
 
-    public Backend(InetSocketAddress address, CircuitBreaker breaker) {
+    public Backend(InetSocketAddress address, CircuitBreaker breaker, MeterRegistry registry) {
         this.address = address;
         this.breaker = breaker;
+        registry.gauge(
+                "gateway_backend_active_connections",
+                Tags.of("address", address.toString()),
+                this,
+                Backend::activeConnections
+        );
+        registry.gauge(
+                "gateway_backend_healthy",
+                Tags.of("address", address.toString()),
+                this,
+                b -> b.isHealthy() ? 1.0 : 0.0
+        );
     }
 
     public InetSocketAddress address() {return address;}

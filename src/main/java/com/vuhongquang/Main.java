@@ -2,6 +2,7 @@ package com.vuhongquang;
 
 import com.vuhongquang.cache.LruResponseCache;
 import com.vuhongquang.cache.ResponseCache;
+import com.vuhongquang.gateway.GatewayHandler;
 import com.vuhongquang.health.HealthChecker;
 import com.vuhongquang.loadbalancer.Backend;
 import com.vuhongquang.loadbalancer.BackendPool;
@@ -10,6 +11,8 @@ import com.vuhongquang.pool.ConnectionPoolManager;
 import com.vuhongquang.ratelimit.slidingwindow.SlidingWindowLimiter;
 import com.vuhongquang.resilience.CircuitBreaker;
 import com.vuhongquang.routing.Router;
+import io.micrometer.prometheusmetrics.PrometheusConfig;
+import io.micrometer.prometheusmetrics.PrometheusMeterRegistry;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelInitializer;
@@ -29,38 +32,44 @@ import java.util.concurrent.TimeUnit;
 
 public class Main {
     public static void main(String[] args) throws InterruptedException {
-        EventLoopGroup boss = new MultiThreadIoEventLoopGroup(NioIoHandler.newFactory());
-        EventLoopGroup worker = new MultiThreadIoEventLoopGroup(NioIoHandler.newFactory());
-
+        final EventLoopGroup boss = new MultiThreadIoEventLoopGroup(NioIoHandler.newFactory());
+        final EventLoopGroup worker = new MultiThreadIoEventLoopGroup(NioIoHandler.newFactory());
         final int MAXCONNECTION = 2048;
         final int ACQUIRETIMEOUTMS = 30000;
         final ResponseCache cache = new LruResponseCache(128 * 1024L * 1024L, 5000);
+        final PrometheusMeterRegistry registry = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
+        final SlidingWindowLimiter limiter = new SlidingWindowLimiter(120, 60_000, 60_000, worker);
 
         worker.scheduleAtFixedRate(cache::logStats, 10, 10, TimeUnit.SECONDS);
 
         List<Backend> movieBackends = List.of(
                 new Backend(
                         new InetSocketAddress("localhost", 8081),
-                        new CircuitBreaker(5000, 0.5, 10, 20)
+                        new CircuitBreaker(5000, 0.5, 10, 20),
+                        registry
                 ),
                 new Backend(
                         new InetSocketAddress("localhost", 8082),
-                        new CircuitBreaker(5000, 0.5, 10, 20)
+                        new CircuitBreaker(5000, 0.5, 10, 20),
+                        registry
                 )
         );
 
         List<Backend> todoBackends = List.of(
                 new Backend(
                         new InetSocketAddress("localhost", 9081),
-                        new CircuitBreaker(5000, 0.5, 10, 20)
+                        new CircuitBreaker(5000, 0.5, 10, 20),
+                        registry
                 ),
                 new Backend(
                         new InetSocketAddress("localhost", 9082),
-                        new CircuitBreaker(5000, 0.5, 10, 20)
+                        new CircuitBreaker(5000, 0.5, 10, 20),
+                        registry
                 ),
                 new Backend(
                         new InetSocketAddress("localhost", 9083),
-                        new CircuitBreaker(5000, 0.5, 10, 20)
+                        new CircuitBreaker(5000, 0.5, 10, 20),
+                        registry
                 )
         );
 
@@ -83,7 +92,6 @@ public class Main {
         backends.addAll(todoBackends);
         ConnectionPoolManager manager = new ConnectionPoolManager(backends, worker, MAXCONNECTION, ACQUIRETIMEOUTMS);
 
-        final SlidingWindowLimiter limiter = new SlidingWindowLimiter(120, 60_000, 60_000, worker);
         limiter.start();
 
         try {
@@ -96,7 +104,8 @@ public class Main {
                             ch.pipeline().addLast(
                                     new HttpServerCodec(),
                                     new HttpObjectAggregator(64 * 1024 * 1024),
-                                    new BackendResponseHandler(router, manager, cache, limiter)
+                                    new GatewayHandler(registry),
+                                    new BackendResponseHandler(router, manager, cache, limiter, registry)
                             );
                         }
                     })
