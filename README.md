@@ -32,7 +32,6 @@ Details are split out rather than kept in one file — see the table below.
 | [`docs/api.md`](docs/api.md) | The `/gateway/*` admin API — add/patch/delete backends, metrics |
 | [`docs/observability.md`](docs/observability.md) | What each metric means and the bugs that shaped them |
 | [`docs/performance.md`](docs/performance.md) | Full benchmark numbers, charts, and methodology |
-| [`docs/netty-guide.md`](docs/netty-guide.md) | Netty fundamentals reference notes |
 | [`target.md`](target.md) | The 12-week roadmap this project follows |
 
 ## Status
