@@ -1,20 +1,15 @@
 package com.vuhongquang.gateway;
 
-import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.SimpleChannelInboundHandler;
 import io.netty.handler.codec.http.*;
-import io.micrometer.prometheusmetrics.PrometheusMeterRegistry;
-import io.prometheus.metrics.expositionformats.PrometheusTextFormatWriter;
-
-import java.nio.charset.StandardCharsets;
 
 public class GatewayHandler extends SimpleChannelInboundHandler<FullHttpRequest> {
 
-    private final PrometheusMeterRegistry registry;
+    private final BackendGatewayService gatewayService;
 
-    public GatewayHandler(PrometheusMeterRegistry registry) {
-        this.registry = registry;
+    public GatewayHandler(BackendGatewayService gatewayService) {
+        this.gatewayService = gatewayService;
     }
 
     @Override
@@ -22,26 +17,16 @@ public class GatewayHandler extends SimpleChannelInboundHandler<FullHttpRequest>
         String uri = msg.uri();
         if (uri.startsWith("/gateway/")) {
             String path = uri.substring("/gateway/".length());
-            switch (path) {
-                case "metrics": {
-                    var body = registry.scrape().getBytes(StandardCharsets.UTF_8);
-                    var res = new DefaultFullHttpResponse(
-                            msg.protocolVersion(),
-                            HttpResponseStatus.OK,
-                            Unpooled.wrappedBuffer(body)
-                    );
-                    res.headers().set(HttpHeaderNames.CONTENT_TYPE, PrometheusTextFormatWriter.CONTENT_TYPE);
-                    res.headers().set(HttpHeaderNames.CONTENT_LENGTH, body.length);
-                    ctx.writeAndFlush(res);
-                    break;
-                }
-
-                default: {
-                    var res = new DefaultFullHttpResponse(msg.protocolVersion(), HttpResponseStatus.NOT_FOUND);
-                    res.headers().set(HttpHeaderNames.CONTENT_LENGTH, 0);
-                    ctx.writeAndFlush(res);
-                }
+            if (path.startsWith("backend")) {
+                gatewayService.handler(ctx, msg);
+                return;
+            } else if (path.startsWith("metrics")) {
+                gatewayService.getMetrics(ctx, msg);
+                return;
             }
+            var errRes = new DefaultFullHttpResponse(msg.protocolVersion(), HttpResponseStatus.NOT_FOUND);
+            errRes.headers().set(HttpHeaderNames.CONTENT_LENGTH, 0);
+            ctx.writeAndFlush(errRes);
         } else {
             msg.retain();
             ctx.fireChannelRead(msg);

@@ -2,119 +2,56 @@ package com.vuhongquang;
 
 import com.vuhongquang.cache.LruResponseCache;
 import com.vuhongquang.cache.ResponseCache;
-import com.vuhongquang.gateway.GatewayHandler;
+import com.vuhongquang.gateway.BackendGatewayService;
+import com.vuhongquang.forwarding.RequestForwarder;
 import com.vuhongquang.health.HealthChecker;
 import com.vuhongquang.loadbalancer.Backend;
 import com.vuhongquang.loadbalancer.BackendPool;
-import com.vuhongquang.loadbalancer.LeastConnectionsStrategy;
 import com.vuhongquang.pool.ConnectionPoolManager;
 import com.vuhongquang.ratelimit.slidingwindow.SlidingWindowLimiter;
-import com.vuhongquang.resilience.CircuitBreaker;
 import com.vuhongquang.routing.Router;
+
 import io.micrometer.prometheusmetrics.PrometheusConfig;
 import io.micrometer.prometheusmetrics.PrometheusMeterRegistry;
-import io.netty.bootstrap.ServerBootstrap;
-import io.netty.channel.ChannelFuture;
-import io.netty.channel.ChannelInitializer;
+
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.MultiThreadIoEventLoopGroup;
 import io.netty.channel.nio.NioIoHandler;
-import io.netty.channel.socket.SocketChannel;
-import io.netty.channel.socket.nio.NioServerSocketChannel;
-import io.netty.handler.codec.http.HttpObjectAggregator;
-import io.netty.handler.codec.http.HttpServerCodec;
 
-import java.net.InetSocketAddress;
-import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 
 public class Main {
     public static void main(String[] args) throws InterruptedException {
+
+        final GatewayConfig config = GatewayConfig.defaults();
         final EventLoopGroup boss = new MultiThreadIoEventLoopGroup(NioIoHandler.newFactory());
         final EventLoopGroup worker = new MultiThreadIoEventLoopGroup(NioIoHandler.newFactory());
-        final int MAXCONNECTION = 2048;
-        final int ACQUIRETIMEOUTMS = 30000;
-        final ResponseCache cache = new LruResponseCache(128 * 1024L * 1024L, 5000);
+        final ResponseCache cache = new LruResponseCache(config.cacheMaxBytes(), config.cacheMaxEntries());
         final PrometheusMeterRegistry registry = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
-        final SlidingWindowLimiter limiter = new SlidingWindowLimiter(120, 60_000, 60_000, worker);
+        final HealthChecker healthChecker = new HealthChecker(new CopyOnWriteArrayList<>(), worker);
+        final Router router = new Router(new ConcurrentHashMap<String, BackendPool>());
+        final ConnectionPoolManager manager = new ConnectionPoolManager(List.<Backend>of(), worker, config.maxConnections(), config.acquireTimeoutMs());
+        final RequestForwarder forwarder = new RequestForwarder(router, manager, cache, registry);
+        final BackendGatewayService gatewayService = new BackendGatewayService(router, manager, healthChecker, registry);
+        final SlidingWindowLimiter limiter = new SlidingWindowLimiter(
+                config.rateLimitCapacity(),
+                config.rateLimitWindowMs(),
+                config.rateLimitIntervalMs(),
+                worker
+        );
 
+        GatewayServer server = new GatewayServer(boss, worker, config.serverPort(), forwarder, gatewayService, limiter, registry);
         worker.scheduleAtFixedRate(cache::logStats, 10, 10, TimeUnit.SECONDS);
-
-        List<Backend> movieBackends = List.of(
-                new Backend(
-                        new InetSocketAddress("localhost", 8081),
-                        new CircuitBreaker(5000, 0.5, 10, 20),
-                        registry
-                ),
-                new Backend(
-                        new InetSocketAddress("localhost", 8082),
-                        new CircuitBreaker(5000, 0.5, 10, 20),
-                        registry
-                )
-        );
-
-        List<Backend> todoBackends = List.of(
-                new Backend(
-                        new InetSocketAddress("localhost", 9081),
-                        new CircuitBreaker(5000, 0.5, 10, 20),
-                        registry
-                ),
-                new Backend(
-                        new InetSocketAddress("localhost", 9082),
-                        new CircuitBreaker(5000, 0.5, 10, 20),
-                        registry
-                ),
-                new Backend(
-                        new InetSocketAddress("localhost", 9083),
-                        new CircuitBreaker(5000, 0.5, 10, 20),
-                        registry
-                )
-        );
-
-        final BackendPool moviePool = new BackendPool(movieBackends, new LeastConnectionsStrategy());
-        final BackendPool todoPool = new BackendPool(todoBackends, new LeastConnectionsStrategy());
-
-        ArrayList<Backend> healthList = new ArrayList<>(todoBackends);
-        healthList.addAll(movieBackends);
-        final HealthChecker healthChecker = new HealthChecker(healthList, worker);
-
+        limiter.start();
         healthChecker.start();
 
-        HashMap<String, BackendPool> routes = new HashMap<>();
-        routes.put("/api/movies", moviePool);
-        routes.put("/api/todos", todoPool);
-
-        Router router = new Router(routes);
-
-        List<Backend> backends = new ArrayList<>(movieBackends);
-        backends.addAll(todoBackends);
-        ConnectionPoolManager manager = new ConnectionPoolManager(backends, worker, MAXCONNECTION, ACQUIRETIMEOUTMS);
-
-        limiter.start();
-
         try {
-            ChannelFuture server = new ServerBootstrap()
-                    .group(boss,worker)
-                    .channel(NioServerSocketChannel.class)
-                    .childHandler(new ChannelInitializer<SocketChannel>() {
-                        @Override
-                        protected void initChannel(SocketChannel ch) {
-                            ch.pipeline().addLast(
-                                    new HttpServerCodec(),
-                                    new HttpObjectAggregator(64 * 1024 * 1024),
-                                    new GatewayHandler(registry),
-                                    new BackendResponseHandler(router, manager, cache, limiter, registry)
-                            );
-                        }
-                    })
-                    .bind(1221)
-                    .sync();
-            server.channel().closeFuture().sync();
+            server.start();
         } finally {
-            boss.shutdownGracefully();
-            worker.shutdownGracefully();
+            server.shutdown();
         }
     }
 }

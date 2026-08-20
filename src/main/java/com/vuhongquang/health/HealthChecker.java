@@ -9,22 +9,32 @@ import io.netty.channel.socket.nio.NioSocketChannel;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 
 public class HealthChecker {
     private static final Logger log = LoggerFactory.getLogger(HealthChecker.class);
 
-    private final List<Backend> backends;
+    private final CopyOnWriteArrayList<Backend> backends;
     private final EventLoopGroup group;
 
-    public HealthChecker(List<Backend> backends, EventLoopGroup group) {
+    public HealthChecker(CopyOnWriteArrayList<Backend> backends, EventLoopGroup group) {
         this.backends = backends;
         this.group = group;
     }
 
     public void start() {
         group.scheduleAtFixedRate(this::checkAll, 0 ,5, TimeUnit.SECONDS);
+    }
+
+    public void addBackend(Backend backend) {
+        backends.add(backend);
+    }
+
+    public void deleteBackend(Backend backend) {
+        backends.remove(backend);
     }
 
     private void checkAll() {

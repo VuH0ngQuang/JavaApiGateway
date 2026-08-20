@@ -44,6 +44,11 @@
             <artifactId>prometheus-metrics-exposition-textformats</artifactId>
             <version>1.8.0</version>
         </dependency>
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+            <version>2.22.1</version>
+        </dependency>
     </dependencies>
 
 </project>

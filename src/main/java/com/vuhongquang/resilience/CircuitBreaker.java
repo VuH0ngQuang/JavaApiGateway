@@ -100,6 +100,22 @@ public class CircuitBreaker {
         return recorded == 0 ? 0.0 : (double) failures / recorded;
     }
 
+    public synchronized long openDurationMs() {
+        return openDurationMs;
+    }
+
+    public synchronized double failureRateThreshold() {
+        return failureRateThreshold;
+    }
+
+    public synchronized int minimumCalls() {
+        return minimumCalls;
+    }
+
+    public synchronized int windowSize() {
+        return windowSize;
+    }
+
     private void open() {
         state = CircuitStateEnum.OPEN;
         openAt = System.currentTimeMillis();

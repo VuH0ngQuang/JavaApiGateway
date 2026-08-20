@@ -10,7 +10,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 public class Backend {
     private final InetSocketAddress address;
-    private final CircuitBreaker breaker;
+    private CircuitBreaker breaker;
     private final AtomicInteger activeConnections = new AtomicInteger(0);
     private volatile boolean healthy = true;
 
@@ -38,6 +38,7 @@ public class Backend {
     public boolean isHealthy() {return healthy;}
     public void setHealthy(boolean healthy) {this.healthy = healthy;}
     public CircuitBreaker getBreaker() {return breaker;}
+    public void setBreaker(CircuitBreaker breaker) {this.breaker = breaker;}
 
     @Override
     public int hashCode() {
