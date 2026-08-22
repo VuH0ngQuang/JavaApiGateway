@@ -15,9 +15,9 @@ public record GatewayConfig(
                 2048,
                 30000,
                 1221,
-                128 * 1024L * 1024L,
+                0L, //cache disabled for raw-proxy-path rps test
                 5000,
-                120,
+                100_000_000,
                 60_000,
                 60_000
         );

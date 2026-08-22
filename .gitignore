@@ -44,3 +44,8 @@ build/
 AGENTS.md
 CLAUDE.md
 target.md
+
+/bench-kit/
+/benchmarks/dummy_backend
+/dependency-reduced-pom.xml
+/INTERVIEW_NOTES.md

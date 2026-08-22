@@ -5,12 +5,10 @@ import io.netty.bootstrap.Bootstrap;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.EventLoopGroup;
-import io.netty.channel.socket.nio.NioSocketChannel;
+import io.netty.channel.socket.SocketChannel;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.ArrayList;
-import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 
@@ -19,10 +17,12 @@ public class HealthChecker {
 
     private final CopyOnWriteArrayList<Backend> backends;
     private final EventLoopGroup group;
+    private final Class<? extends SocketChannel> channelClass;
 
-    public HealthChecker(CopyOnWriteArrayList<Backend> backends, EventLoopGroup group) {
+    public HealthChecker(CopyOnWriteArrayList<Backend> backends, EventLoopGroup group, Class<? extends SocketChannel> channelClass) {
         this.backends = backends;
         this.group = group;
+        this.channelClass = channelClass;
     }
 
     public void start() {
@@ -44,7 +44,7 @@ public class HealthChecker {
     private void checkOne(Backend be) {
         Bootstrap bootstrap = new Bootstrap();
         bootstrap.group(group)
-                .channel(NioSocketChannel.class)
+                .channel(channelClass)
                 .handler(new ChannelInboundHandlerAdapter());
 
         bootstrap.connect(be.address()).addListener((ChannelFuture future) -> {

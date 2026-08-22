@@ -124,4 +124,9 @@ public class LruResponseCache implements ResponseCache {
                 entryCount(), bytes.get(), hits.sum(), misses.sum(),
                 String.format("%.1f%%", hitRate() * 100));
     }
+
+    @Override
+    public long maxBytes() {
+        return maxBytes;
+    }
 }

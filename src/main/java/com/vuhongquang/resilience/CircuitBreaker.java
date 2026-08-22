@@ -1,24 +1,21 @@
 package com.vuhongquang.resilience;
 
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.LongAdder;
+
 public class CircuitBreaker {
-    private final int windowSize;
-    private final int minimumCalls;
+
     private final double failureRateThreshold;
     private final long openDurationMs;
+    private final int minimumCalls;
+    private final int windowSize;
 
-    private final boolean[] failed;
-    private int index;
-    private int recorded;
-    private int failures;
-    private CircuitStateEnum state;
-    private long openAt;
-    private boolean probeInFlight = false;
+    private final LongAdder recorded = new LongAdder();
+    private final LongAdder failures = new LongAdder();
+    private final AtomicReference<StateHolder> stateRef = new AtomicReference<>(new StateHolder(CircuitStateEnum.CLOSED, 0L, false));
 
     public CircuitBreaker(long openDurationMs, double failureRateThreshold, int minimumCalls, int windowSize) {
-        if (windowSize <= 0) {
-            throw new IllegalArgumentException("windowSize must be positive, got " + windowSize);
-        }
-        if (minimumCalls <= 0 || minimumCalls > windowSize) {
+        if (minimumCalls <= 0) {
             throw new IllegalArgumentException(
                     "minimumCalls must be in 1.." + windowSize + ", got " + minimumCalls);
         }
@@ -31,112 +28,77 @@ public class CircuitBreaker {
         this.failureRateThreshold = failureRateThreshold;
         this.minimumCalls = minimumCalls;
         this.windowSize = windowSize;
-
-        this.failed = new boolean[windowSize];
-        this.index = 0;
-        this.recorded = 0;
-        this.failures = 0;
-        this.state = CircuitStateEnum.CLOSED;
-        this.openAt = 0;
     }
 
-    public synchronized void recordFailure() {
-        record(true);
-        if (state == CircuitStateEnum.HALF_OPEN) {
-            open();
-        } else if (state == CircuitStateEnum.CLOSED && thresholdBreached()) {
-            open();
+    public void recordFailure() {
+        recorded.increment();
+        failures.increment();
+        StateHolder s = stateRef.get();
+        if (s.state() == CircuitStateEnum.HALF_OPEN) {
+            stateRef.compareAndSet(s, new StateHolder(CircuitStateEnum.OPEN, System.currentTimeMillis(), false));
+        } else if (s.state() == CircuitStateEnum.CLOSED
+                && recorded.sum() >= minimumCalls
+                && (double) failures.sum() / recorded.sum() >= failureRateThreshold) {
+            stateRef.compareAndSet(s, new StateHolder(CircuitStateEnum.OPEN, System.currentTimeMillis(), false));
         }
     }
 
-    public synchronized void recordSuccess() {
-        record(false);
-        if (state == CircuitStateEnum.HALF_OPEN) {
-            state = CircuitStateEnum.CLOSED;
-            index = 0;
-            recorded = 0;
-            failures = 0;
-            probeInFlight = false;
+    public void recordSuccess() {
+        recorded.increment();
+        StateHolder s = stateRef.get();
+        if (s.state() == CircuitStateEnum.HALF_OPEN
+                && stateRef.compareAndSet(s, new StateHolder(CircuitStateEnum.CLOSED, 0L, false))) {
+            recorded.reset();
+            failures.reset();
         }
     }
 
-    public synchronized boolean allowRequest() {
-        switch (state) {
-            case CLOSED -> {
-                return true;
-            }
-            case OPEN -> {
-                if (System.currentTimeMillis() - openAt >= openDurationMs) {
-                    state = CircuitStateEnum.HALF_OPEN;
-                    probeInFlight = true;
-                    return true;
-                }
-                return false;
-            }
-            case HALF_OPEN -> {
-                if (!probeInFlight) {
-                    probeInFlight = true;
-                    return true;
-                }
-                return false;
-            }
-        }
-        return false;
-    }
-
-    public synchronized boolean isAvailable() {
-        return switch (state) {
+    public boolean allowRequest() {
+        StateHolder s = stateRef.get();
+        return switch (s.state()) {
             case CLOSED -> true;
-            case OPEN -> System.currentTimeMillis() - openAt >= openDurationMs;
-            case HALF_OPEN -> !probeInFlight;
+            case OPEN -> {
+                if (System.currentTimeMillis() - s.openAt() >= openDurationMs) {
+                    yield stateRef.compareAndSet(s, new StateHolder(CircuitStateEnum.HALF_OPEN, s.openAt(), true));
+                }
+                yield false;
+            }
+            case HALF_OPEN -> !s.probeInFlight()
+                    && stateRef.compareAndSet(s, new StateHolder(s.state(), s.openAt(), true));
         };
     }
 
-    public synchronized CircuitStateEnum state() {
-        return state;
+    public boolean isAvailable() {
+        StateHolder s = stateRef.get();
+        return switch (s.state()) {
+            case CLOSED -> true;
+            case OPEN -> System.currentTimeMillis() - s.openAt() >= openDurationMs;
+            case HALF_OPEN -> !s.probeInFlight();
+        };
     }
 
-    public synchronized double failureRate() {
-        return recorded == 0 ? 0.0 : (double) failures / recorded;
+    public CircuitStateEnum state() {
+        return stateRef.get().state();
     }
 
-    public synchronized long openDurationMs() {
+    public double failureRate() {
+        long rec = recorded.sum();
+        return rec == 0 ? 0.0 : (double) failures.sum() / rec;
+    }
+
+    public long openDurationMs() {
         return openDurationMs;
     }
 
-    public synchronized double failureRateThreshold() {
+    public double failureRateThreshold() {
         return failureRateThreshold;
     }
 
-    public synchronized int minimumCalls() {
+    public int minimumCalls() {
         return minimumCalls;
     }
 
-    public synchronized int windowSize() {
+    public int windowSize() {
         return windowSize;
-    }
-
-    private void open() {
-        state = CircuitStateEnum.OPEN;
-        openAt = System.currentTimeMillis();
-        probeInFlight = false;
-    }
-
-    private boolean thresholdBreached() {
-        return recorded >= minimumCalls && (double) failures / recorded >= failureRateThreshold;
-    }
-
-    private void record(boolean isFailure) {
-        if (recorded == windowSize && failed[index]) {
-            failures--;
-        }
-        failed[index] = isFailure;
-        if (isFailure) {
-            failures++;
-        }
-        index = (index + 1) % windowSize;
-        if (recorded < windowSize) {
-            recorded++;
-        }
     }
 }

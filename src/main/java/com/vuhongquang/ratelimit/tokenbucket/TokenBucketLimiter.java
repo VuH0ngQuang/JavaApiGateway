@@ -18,13 +18,13 @@ public class TokenBucketLimiter implements RateLimiter {
 
 
     private final int maxToken;
-    private final int refillRate;
+    private final long refillRate;
     private final long interval;
     private final EventLoopGroup group;
 
     private boolean started = false;
 
-    public TokenBucketLimiter(int maxToken, int refillRate, long interval, EventLoopGroup group) {
+    public TokenBucketLimiter(int maxToken, long refillRate, long interval, EventLoopGroup group) {
         this.maxToken = maxToken;
         this.refillRate = refillRate;
         this.interval = interval;
@@ -42,6 +42,7 @@ public class TokenBucketLimiter implements RateLimiter {
         Bucket bucket = buckets.computeIfAbsent(key, k -> new Bucket(maxToken, refillRate, interval));
         return ImmediateEventExecutor.INSTANCE.newSucceededFuture(bucket.tryConsume());
     }
+
 
     private void checkAll() {
         try {

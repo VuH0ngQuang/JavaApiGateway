@@ -3,6 +3,7 @@ package com.vuhongquang.loadbalancer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 
@@ -15,11 +16,15 @@ public abstract class LoadBalancingStrategy {
             log.error("Backend pool is empty: ");
             return null;
         } else {
-            var healthyBackends = backends.stream()
-                    .filter(b -> !excluded.contains(b))
-                    .filter(Backend::isHealthy)
-                    .filter(b -> b.getBreaker().isAvailable())
-                    .toList();
+
+            ArrayList<Backend> healthyBackends = new ArrayList<>();
+
+            for (Backend be : backends) {
+                if (!excluded.contains(be) && be.isHealthy()) {
+                    healthyBackends.add(be);
+                }
+            }
+
             if (isEmpty(healthyBackends)) {
                 log.error("There is no healthy Backend");
                 return null;

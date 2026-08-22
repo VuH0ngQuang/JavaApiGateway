@@ -21,6 +21,12 @@ distributed systems, and observability by building rather than reading about the
   the error-rate signal), per-backend active-connection and health gauges.
 - **Dynamic configuration** — backends and routes are created, patched, and deleted at
   runtime through an admin API; `Main` boots with zero hardcoded backends.
+- **Performance-tuned request path** — native Epoll transport (falls back to NIO off
+  Linux), response-body streaming (no full-response buffering, with backpressure so a
+  slow client can't grow the gateway's memory unbounded), and a lock-free rate limiter
+  and circuit breaker (no `synchronized`/`ReentrantLock` on the hot path). **+83%
+  peak throughput** over the pre-Week-11 baseline, JFR-verified to zero lock
+  contention — see [`docs/performance.md`](docs/performance.md#week-11-performance-optimization).
 
 Details are split out rather than kept in one file — see the table below.
 
@@ -36,7 +42,7 @@ Details are split out rather than kept in one file — see the table below.
 
 ## Status
 
-Through **Week 10** of the roadmap.
+Through **Week 11** of the roadmap.
 
 | Week | Topic | Status |
 |------|-------|--------|
@@ -50,7 +56,7 @@ Through **Week 10** of the roadmap.
 | 8 | Resilience (retry with backend exclusion, rate-based circuit breaker) | ✅ |
 | 9 | Observability (Prometheus/Micrometer metrics) | ✅ |
 | 10 | Dynamic Configuration (admin API — add/patch/delete backends & routes) | ✅ |
-| 11 | Performance Optimization | ⬜ |
+| 11 | Performance Optimization (Epoll, streaming, lock-free rate limit/circuit breaker) | ✅ |
 | 12 | Production Ready (Docker, CI/CD, docs) | ⬜ |
 
 ## Running
@@ -78,11 +84,12 @@ Full endpoint reference: [`docs/api.md`](docs/api.md).
 ## Tech Stack
 
 - Java 21
-- Netty 4.2 (`netty-all`)
+- Netty 4.2 (`netty-all`), native Epoll transport on Linux
 - Maven
 - Logback (SLF4J)
 - Micrometer + Prometheus client (metrics)
 - Jackson (admin API JSON)
-- k6 (benchmarking)
+- k6 (benchmarking); dummy backend for benchmarks is a small Go binary
+  (`benchmarks/dummy_backend.go`) — no runtime dependency on the target machine
 
 Planned for later weeks: Docker, GitHub Actions.

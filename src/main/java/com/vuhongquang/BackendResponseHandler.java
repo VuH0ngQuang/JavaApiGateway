@@ -3,6 +3,7 @@ package com.vuhongquang;
 import com.vuhongquang.forwarding.RequestForwarder;
 import com.vuhongquang.ratelimit.RateLimiter;
 
+import io.micrometer.core.instrument.Counter;
 import io.micrometer.prometheusmetrics.PrometheusMeterRegistry;
 
 import io.netty.channel.*;
@@ -24,6 +25,7 @@ public class BackendResponseHandler extends SimpleChannelInboundHandler<FullHttp
     private final RequestForwarder forwarder;
     private final RateLimiter limiter;
     private final PrometheusMeterRegistry registry;
+    private final Counter requestCounter;
 
     public BackendResponseHandler(
             RequestForwarder forwarder,
@@ -32,6 +34,7 @@ public class BackendResponseHandler extends SimpleChannelInboundHandler<FullHttp
         this.forwarder = forwarder;
         this.limiter = limiter;
         this.registry = registry;
+        this.requestCounter = registry.counter("gateway_requests");
     }
 
     @Override
@@ -39,10 +42,9 @@ public class BackendResponseHandler extends SimpleChannelInboundHandler<FullHttp
         String clientIp = ((InetSocketAddress) ctx.channel().remoteAddress()).getAddress().getHostAddress();
         Timer.Sample time = Timer.start(registry);
         log.info("-> {} {} from {}", msg.method(), msg.uri(), clientIp);
-
         final HttpVersion clientVersion = msg.protocolVersion();
 
-        registry.counter("gateway_requests").increment();
+        requestCounter.increment();
         //rate limit
         limiter.tryAcquire(clientIp).addListener((Future<Boolean> f) -> {
             if (!f.isSuccess()) {

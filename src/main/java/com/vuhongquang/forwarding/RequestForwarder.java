@@ -9,6 +9,7 @@ import com.vuhongquang.pool.ConnectionPoolManager;
 import com.vuhongquang.routing.Router;
 import io.micrometer.core.instrument.Timer;
 import io.micrometer.prometheusmetrics.PrometheusMeterRegistry;
+import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufUtil;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.*;
@@ -19,6 +20,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.LinkedHashSet;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -29,6 +31,8 @@ public class RequestForwarder {
     private final ConnectionPoolManager manager;
     private final ResponseCache cache;
     private final PrometheusMeterRegistry registry;
+
+    private final ConcurrentHashMap<Integer, Timer> timerCache = new ConcurrentHashMap<>();
 
     public RequestForwarder(Router router, ConnectionPoolManager manager, ResponseCache cache, PrometheusMeterRegistry registry) {
         this.router = router;
@@ -46,7 +50,7 @@ public class RequestForwarder {
         //check cache for GET
         boolean cacheable = HttpMethod.GET.equals(msg.method());
 
-        if (cacheable) {
+        if (cache.maxBytes() != 0 && cacheable) {
             CachedResponse cached = cache.get(msg.uri());
             if (cached != null) {
                 var res = new DefaultFullHttpResponse(
@@ -186,39 +190,119 @@ public class RequestForwarder {
 
             AtomicBoolean done = new AtomicBoolean(false);
 
-            SimpleChannelInboundHandler<FullHttpResponse> responseHandler =
-                    new SimpleChannelInboundHandler<>() {
-                        @Override
-                        protected void channelRead0(ChannelHandlerContext backendCtx, FullHttpResponse res) {
-                            log.info("<- {} ({} bytes) from backend {} for {} {}",
-                                    res.status(), res.content().readableBytes(),
-                                    backend.address(), method, uri);
-                            res.retain();
-                            if (cacheable && res.status() == HttpResponseStatus.OK) {
-                                byte[] body = ByteBufUtil.getBytes(res.content());
-                                cache.put(uri, res.status(), body, res.headers());
+//            SimpleChannelInboundHandler<FullHttpResponse> responseHandler =
+//                    new SimpleChannelInboundHandler<>() {
+//                        @Override
+//                        protected void channelRead0(ChannelHandlerContext backendCtx, FullHttpResponse res) {
+//                            log.info("<- {} ({} bytes) from backend {} for {} {}",
+//                                    res.status(), res.content().readableBytes(),
+//                                    backend.address(), method, uri);
+//                            res.retain();
+//                            if (cache.maxBytes() != 0 && cacheable && res.status() == HttpResponseStatus.OK) {
+//                                byte[] body = ByteBufUtil.getBytes(res.content());
+//                                cache.put(uri, res.status(), body, res.headers());
+//                            }
+//                            ctx.writeAndFlush(res);
+//                            msg.release();
+//                            finishExchange(done, backend, connectionPool, ch, this, true, time, res.status());
+//                        }
+//
+//                        @Override
+//                        public void channelInactive(ChannelHandlerContext backendCtx) {
+//                            log.error("x- Backend {} closed connection before responding to {} {}",
+//                                    backend.address(), method, uri);
+//                            sendError(ctx, msg, HttpResponseStatus.BAD_GATEWAY);
+//                            finishExchange(done, backend, connectionPool, ch, this, false, time, HttpResponseStatus.BAD_GATEWAY);
+//                        }
+//
+//                        @Override
+//                        public void exceptionCaught(ChannelHandlerContext backendCtx, Throwable cause) {
+//                            log.error("x- Error from backend {} for {} {}: {}",
+//                                    backend.address(), method, uri, cause.toString());
+//                            sendError(ctx, msg, HttpResponseStatus.BAD_GATEWAY);
+//                            finishExchange(done, backend, connectionPool, ch, this, false, time, HttpResponseStatus.BAD_GATEWAY);
+//                        }
+//                    };
+
+            ChannelInboundHandlerAdapter responseHandler = new ChannelInboundHandlerAdapter() {
+                HttpResponseStatus status;
+                ByteBuf byteBuf;
+                HttpHeaders headers;
+                @Override
+                public void channelRead(ChannelHandlerContext backendCtx, Object backendMsg) throws Exception {
+                    try {
+                        if (backendMsg instanceof HttpResponse res) {
+                            status = res.status();
+                            headers = res.headers();
+                            if (cache.maxBytes() != 0 && cacheable && HttpResponseStatus.OK.equals(status)) {
+                                byteBuf = backendCtx.alloc().buffer();
                             }
+                            if (ctx.pipeline().context("backpressure") != null) {
+                                ctx.pipeline().remove("backpressure");
+                            }
+                            ctx.pipeline().addLast("backpressure", new ChannelInboundHandlerAdapter() {
+                                @Override
+                                public void channelWritabilityChanged(ChannelHandlerContext clientCtx) {
+                                    ch.config().setAutoRead(clientCtx.channel().isWritable());
+                                }
+                            });
                             ctx.writeAndFlush(res);
-                            msg.release();
-                            finishExchange(done, backend, connectionPool, ch, this, true, time, res.status());
                         }
+                        if (backendMsg instanceof HttpContent content) {
+                            if (byteBuf != null) {
+                                byteBuf.writeBytes(content.content().duplicate());
+                            }
+                            ctx.writeAndFlush(content);
+                            if (backendMsg instanceof LastHttpContent) {
+                                if (byteBuf != null) {
+                                    cache.put(uri, status, ByteBufUtil.getBytes(byteBuf), headers);
+                                    byteBuf.release();
+                                }
+                                finishExchange(done, backend, connectionPool, ch, this, true, time, status);
+                                if (ctx.pipeline().context("backpressure") != null) {
+                                    ctx.pipeline().remove("backpressure");
+                                }
+                                msg.release();
+                            }
+                        }
+                    } catch (Exception e) {
+                        log.error("x- Unexpected error handling response from backend {} for {} {}: {}", backend.address(), method, uri, e.toString());
+                    }
+                }
+                @Override
+                public void channelInactive(ChannelHandlerContext backendCtx) {
+                    if (done.get()) return;
+                    if (status == null) {
+                        log.error("x- Backend {} closed connection before responding to {} {}", backend.address(), method, uri);
+                        sendError(ctx, msg, HttpResponseStatus.BAD_GATEWAY);
+                    } else {
+                        log.error("x- Backend {} closed connection mid-response to {} {}", backend.address(), method, uri);
+                        ctx.close();
+                    }
+                    if (byteBuf != null) byteBuf.release();
+                    finishExchange(done, backend, connectionPool, ch, this, false, time, HttpResponseStatus.BAD_GATEWAY);
+                    if (ctx.pipeline().context("backpressure") != null) {
+                        ctx.pipeline().remove("backpressure");
+                    }
+                }
 
-                        @Override
-                        public void channelInactive(ChannelHandlerContext backendCtx) {
-                            log.error("x- Backend {} closed connection before responding to {} {}",
-                                    backend.address(), method, uri);
-                            sendError(ctx, msg, HttpResponseStatus.BAD_GATEWAY);
-                            finishExchange(done, backend, connectionPool, ch, this, false, time, HttpResponseStatus.BAD_GATEWAY);
-                        }
+                @Override
+                public void exceptionCaught(ChannelHandlerContext backendCtx, Throwable cause) {
+                    if (done.get()) return;
+                    log.error("x- Error from backend {} for {} {}: {}", backend.address(), method, uri, cause.toString());
+                    if (status == null) {
+                        sendError(ctx, msg, HttpResponseStatus.BAD_GATEWAY);
+                    } else {
+                        ctx.close();
+                    }
+                    if (byteBuf != null) byteBuf.release();
+                    finishExchange(done, backend, connectionPool, ch, this, false, time, HttpResponseStatus.BAD_GATEWAY);
+                    if (ctx.pipeline().context("backpressure") != null) {
+                        ctx.pipeline().remove("backpressure");
+                    }
+                }
+            };
 
-                        @Override
-                        public void exceptionCaught(ChannelHandlerContext backendCtx, Throwable cause) {
-                            log.error("x- Error from backend {} for {} {}: {}",
-                                    backend.address(), method, uri, cause.toString());
-                            sendError(ctx, msg, HttpResponseStatus.BAD_GATEWAY);
-                            finishExchange(done, backend, connectionPool, ch, this, false, time, HttpResponseStatus.BAD_GATEWAY);
-                        }
-                    };
 
             ch.pipeline().addLast("response", responseHandler);
             ch.writeAndFlush(request).addListener((ChannelFuture wf) -> {
@@ -233,6 +317,7 @@ public class RequestForwarder {
     }
 
     public void stopTimer(Timer.Sample time, HttpResponseStatus status) {
-        time.stop(registry.timer("gateway_request_duration_seconds", "status", String.valueOf(status.code())));
+        Timer timer = timerCache.computeIfAbsent(status.code(), code -> registry.timer("gateway_request_duration_seconds", "status", String.valueOf(code)));
+        time.stop(timer);
     }
 }

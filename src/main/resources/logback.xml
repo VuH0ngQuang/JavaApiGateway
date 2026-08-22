@@ -1,0 +1,18 @@
+<configuration>
+
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} -- %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <!-- Per-request log lines run on the hot path; keep them off by default so a
+         normal run doesn't pay logging overhead for every single request. -->
+    <logger name="com.vuhongquang.BackendResponseHandler" level="WARN"/>
+    <logger name="com.vuhongquang.forwarding.RequestForwarder" level="WARN"/>
+
+    <root level="INFO">
+        <appender-ref ref="CONSOLE"/>
+    </root>
+
+</configuration>

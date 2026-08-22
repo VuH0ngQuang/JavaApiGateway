@@ -4,6 +4,7 @@
 Client
    |
 Netty pipeline: HttpServerCodec -> HttpObjectAggregator -> GatewayHandler -> BackendResponseHandler
+   |            (request side only -- responses stream back, see RequestForwarder below)
    |
    +-- /gateway/*  --> GatewayHandler --> BackendGatewayService (admin API, see api.md)
    |                                       - never touches routing/proxy state directly
@@ -19,15 +20,24 @@ Netty pipeline: HttpServerCodec -> HttpObjectAggregator -> GatewayHandler -> Bac
                               |
                             BackendPool --- LoadBalancingStrategy (Round Robin / Least Connections)
                               |                     ^
-                              |                     | filters to healthy + circuit-available
-                              v
-                            ConnectionPoolManager --> ConnectionPool (one per Backend)
-                              |                        borrow an idle keep-alive channel,
-                              |                        or open one, or queue until timeout
+                              |                     | filters to healthy backends
+                              v                     | (circuit-availability now checked once,
+                            ConnectionPoolManager    |  post-selection -- see resilience below)
+                              |    --> ConnectionPool (one per Backend, no HttpObjectAggregator --
+                              |         borrow an idle keep-alive channel,      response streams
+                              |         or open one, or queue until timeout)    through in chunks
                               +---> Backend 1  <-----+---- CircuitBreaker (per backend)
                               +---> Backend 2  <-----+---- HealthChecker (TCP probe every 5s)
                               +---> ...
 ```
+
+`GatewayServer` picks Netty's native Epoll transport on Linux (`Epoll.isAvailable()`,
+falling back to NIO elsewhere) — the `boss`/`worker` `EventLoopGroup`s, the server and
+client `SocketChannel` classes, and every `Bootstrap`/`ServerBootstrap` in the codebase
+(`GatewayServer`, `ConnectionPool`, `HealthChecker`) all take the resolved
+`IoHandlerFactory`/channel classes from `Main` rather than hardcoding NIO — this was a
+Week 11 change; see [`performance.md`](performance.md#week-11-performance-optimization)
+for the throughput difference it made, especially at low-to-moderate concurrency.
 
 Every `Backend`, `BackendPool`, `Router` entry, and `ConnectionPool` in a running gateway
 was created at runtime through the [admin API](api.md) — `Main` boots with empty
@@ -78,6 +88,35 @@ owns the Netty `ServerBootstrap`/`EventLoopGroup` lifecycle (`start()`/`shutdown
     (`IllegalReferenceCountException` from retrying against an already-zero refcount) at
     different points during development — the current design retains once for the whole
     multi-attempt exchange, not once per attempt.
+  - **Response streaming (Week 11)** — the per-exchange backend response handler is a
+    plain `ChannelInboundHandlerAdapter` (not `SimpleChannelInboundHandler`, which would
+    auto-release messages before the streaming code gets a chance to forward them). It
+    reacts to three message types individually as they arrive from the (now
+    un-aggregated) backend connection: an `HttpResponse` triggers a header-only reply to
+    the client immediately, each `HttpContent` is forwarded as it arrives (and copied
+    into a cache-accumulator buffer only if this specific response is GET+200+cacheable
+    — otherwise zero extra copies), and `LastHttpContent` finalizes the cache write and
+    the exchange. Request bodies are still fully aggregated (`HttpObjectAggregator`
+    stays on the client-facing pipeline) — deliberately not streamed, because retrying a
+    failed attempt against a different backend resends the same request content, which
+    a consumed/streamed body can't support.
+  - **Backpressure** — a `channelWritabilityChanged` listener is added to the
+    *client*-facing pipeline once headers arrive, toggling `setAutoRead` on the
+    *backend* channel: if the client can't drain fast enough, stop reading more from the
+    backend rather than letting Netty's outbound write buffer grow unbounded (which can
+    OOM a fast backend serving a slow client). Removed on every exchange-completion path
+    to avoid a duplicate-handler-name crash on the connection's next request; the add
+    itself removes any stale handler first as a second line of defense, since a
+    left-over handler's closure would otherwise reference the *previous* exchange's
+    backend channel.
+  - **Committed-response semantics** — `channelInactive`/`exceptionCaught` on the
+    backend connection now branch on whether headers were already sent to the client
+    (`status == null` → a clean `sendError()` is still possible; otherwise → `ctx.close()`,
+    since a proxy that already streamed part of a response can't rewrite it, matching
+    real reverse-proxy behavior). Both are also guarded by `if (done.get()) return;` at
+    the top — a backend connection closing normally *after* the exchange already
+    finished successfully (e.g. an idle pooled connection timing out later) must not be
+    treated as a new failure.
 
 ## `gateway` package
 
@@ -101,13 +140,20 @@ owns the Netty `ServerBootstrap`/`EventLoopGroup` lifecycle (`start()`/`shutdown
 - **`BackendPool`** — holds a `CopyOnWriteArrayList<Backend>` (mutable — backends are
   added/removed at runtime via the admin API, while every in-flight request is
   concurrently reading the list to select from it) and a `LoadBalancingStrategy`.
-  `select(excluded)` filters to healthy + circuit-available backends, excludes anything
-  already tried this exchange, and delegates the pick to the strategy.
+  `select(excluded)` filters to healthy backends, excludes anything already tried this
+  exchange, and delegates the pick to the strategy — circuit-breaker eligibility is
+  checked once, after selection (see `LoadBalancingStrategy`), not as a pool-wide
+  pre-filter.
 - **`LoadBalancingStrategy`** (abstract, Template Method) — `select()` handles the shared
-  guard logic (empty pool, no eligible backend, circuit breaker's `allowRequest()`) and
-  the connection-count bookkeeping (`incrementConnections()` happens here, exactly once,
-  only after a pick has cleared `allowRequest()` — not inside `doSelect()`, which stays a
-  pure comparison with no side effects). Concrete strategies only implement `doSelect()`.
+  guard logic (empty pool, no eligible backend) and the connection-count bookkeeping
+  (`incrementConnections()` happens here, exactly once, only after a pick has cleared
+  `allowRequest()` — not inside `doSelect()`, which stays a pure comparison with no side
+  effects). Concrete strategies only implement `doSelect()`. Until Week 11, `select()`
+  also pre-filtered every backend in the pool through `getBreaker().isAvailable()`
+  before ever calling `doSelect()` — removed as a JFR-measured lock-contention source
+  (every request touched every backend's `CircuitBreaker`, not just the one it ended up
+  using); the post-selection `allowRequest()` check plus the existing retry/exclusion
+  mechanism already reject and route around an open-circuit pick without it.
   - **`RoundRobinStrategy`** — cycles via an `AtomicInteger` index.
   - **`LeastConnectionsStrategy`** — starts its scan from a rotating index (same
     `AtomicInteger` pattern as round robin) rather than always `backends.get(0)`, so ties
@@ -124,11 +170,15 @@ owns the Netty `ServerBootstrap`/`EventLoopGroup` lifecycle (`start()`/`shutdown
 
 - **`Router`** — a `ConcurrentHashMap<String, BackendPool>` (concurrent because routes
   can be registered at runtime while every request reads the map). `match(uri)` does
-  longest-prefix matching for proxied traffic; `getExact(uri)` requires an exact string
-  match, used by the admin API where a client-supplied `route` has to name a real,
-  already-known prefix rather than fuzzily match one. `register(uri, pool)` adds a new
-  route — called by `BackendGatewayService` when `POST /gateway/backends` targets an
-  unknown route.
+  longest-prefix matching for proxied traffic with a plain `for` loop over the
+  registered keys (changed from a `.stream().filter().max(...)` in Week 11 — same O(n)
+  complexity either way, just without the per-request Stream/lambda/boxed-`Integer`
+  allocation; a trie would change the complexity class but isn't worth the added
+  mutable-tree concurrency story at this project's realistic route counts, roughly a
+  hundred). `getExact(uri)` requires an exact string match, used by the admin API where
+  a client-supplied `route` has to name a real, already-known prefix rather than
+  fuzzily match one. `register(uri, pool)` adds a new route — called by
+  `BackendGatewayService` when `POST /gateway/backends` targets an unknown route.
 
 ## `pool` package
 
@@ -162,27 +212,46 @@ owns the Netty `ServerBootstrap`/`EventLoopGroup` lifecycle (`start()`/`shutdown
   changing.
   - **`tokenbucket.TokenBucketLimiter`** / **`Bucket`** — per-key token bucket; a sweep
     task evicts buckets that are back to **full** (not empty — evicting an idle-but-not-
-    full bucket would reset its banked allowance for no reason).
+    full bucket would reset its banked allowance for no reason). `Bucket` is lock-free
+    (Week 11): an `AtomicReference<State>` holding `(token, lastRefillTime)`, refilled
+    lazily on each `tryConsume()` via a CAS loop, not a monitor. It started out
+    `synchronized` — since every request from the same client IP shares one `Bucket`,
+    that lock alone accounted for a meaningful share of a JFR-measured throughput
+    ceiling (see [`performance.md`](performance.md#week-11-performance-optimization)).
   - **`slidingwindow.SlidingWindowLimiter`** / **`Window`** — per-key timestamp deque;
     the sweep evicts windows that are **idle** (no timestamps left after expiring old
-    ones).
+    ones). `Main` currently wires `TokenBucketLimiter` as the active `RateLimiter`;
+    `Window` is still `synchronized` internally and was the original Week 11 hot-lock
+    finding, superseded by switching the active limiter rather than rewriting `Window`
+    itself lock-free (a lock-free "sliding window counter" design — bucketed counts
+    interpolated across adjacent fixed windows — was drafted but not carried through).
   - Both limiters key by client IP, keyed off a `ConcurrentHashMap`, with their own
     periodic sweep scheduled on the shared `EventLoopGroup` — no dedicated cleanup
     thread.
 
 ## `resilience` package
 
-- **`CircuitBreaker`** — rate-based (not consecutive-failure-count), tracked over a
-  fixed-size ring buffer (`windowSize`), only evaluated once `minimumCalls` outcomes
-  have been recorded. States: `CLOSED` → `OPEN` (threshold breached) → `HALF_OPEN` (one
-  probe allowed after `openDurationMs`) → back to `CLOSED` on a successful probe, or
-  `OPEN` again on a failed one. `allowRequest()` is the only method that mutates state;
-  `isAvailable()` is a read-only check used by `LoadBalancingStrategy`'s eligibility
-  filter, which runs *before* a backend is chosen (mutating `allowRequest()` runs after,
-  exactly once, on the backend actually picked). Config fields are `final` — reconfiguring
-  a breaker means constructing a new instance and swapping it in via `Backend.setBreaker`,
-  not mutating the running one (see [`api.md`](api.md#patch-gatewaybackendsid) for the
-  state-loss tradeoff that implies).
+- **`CircuitBreaker`** — rate-based (not consecutive-failure-count). States: `CLOSED` →
+  `OPEN` (threshold breached) → `HALF_OPEN` (one probe allowed after `openDurationMs`) →
+  back to `CLOSED` on a successful probe, or `OPEN` again on a failed one. `allowRequest()`
+  is the only method that mutates state; `isAvailable()` is a read-only check. Config
+  fields are `final` — reconfiguring a breaker means constructing a new instance and
+  swapping it in via `Backend.setBreaker`, not mutating the running one (see
+  [`api.md`](api.md#patch-gatewaybackendsid) for the state-loss tradeoff that implies).
+  Lock-free since Week 11: state lives in an `AtomicReference<StateHolder>`
+  (`state`/`openAt`/`probeInFlight` as one immutable record, swapped via
+  compare-and-set), and failure/call counts are `LongAdder`s reset on a successful
+  `HALF_OPEN` probe — replacing a `synchronized` fixed-size ring buffer (`windowSize`
+  boolean array, only evaluated once `minimumCalls` outcomes had been recorded). The
+  semantics shifted slightly: counts now run since the circuit last closed rather than
+  over a strict last-N-calls window, and `windowSize` no longer bounds anything (kept in
+  the constructor signature for API compatibility). This was the single largest lock
+  contention source found by JFR — every request touched a `CircuitBreaker` method
+  multiple times (`LoadBalancingStrategy.select()` originally called `isAvailable()` on
+  every backend in the pool, not just the one selected — that pre-filter was removed
+  too, since `allowRequest()` on the chosen backend plus the existing retry/exclusion
+  path already covers a rejected pick). See
+  [`performance.md`](performance.md#week-11-performance-optimization).
 
 ## `health` package
 

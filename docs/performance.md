@@ -165,6 +165,101 @@ a connect-time failure now retries against a different backend within the same e
 and enough failures within a window trips that backend's circuit breaker independent of
 the 5-second health-check cadence.
 
+## Week 11 performance optimization
+
+Starting point: a plateau around **10,700 rps** peak (8KB bodies, 10 backends) that
+didn't move whether load came from 8 or 16 CPU cores — a strong signal that something
+was serializing every request through a single point, not that the machine was out of
+compute. JFR (`jdk.JavaMonitorEnter`/`jdk.ThreadPark`, thresholds set directly on the
+command line: `...,jdk.JavaMonitorEnter#threshold=3ms,jdk.ThreadPark#threshold=3ms`)
+found it.
+
+### Locks removed from the hot path
+
+| Class | Problem | Fix |
+|---|---|---|
+| `LruResponseCache` | Global `ReentrantLock`, acquired on every request regardless of whether caching was even enabled | Skip the cache read/write entirely when `cacheMaxBytes == 0` |
+| `TokenBucketLimiter`'s `Bucket` | `synchronized tryConsume()`/`isFull()` — single lock per client IP, so all traffic from one IP (the common case in this benchmark) serialized on one lock | Rewrote lock-free: `AtomicReference<State>` holding `(token, lastRefillTime)`, refill computed lazily, CAS loop instead of a monitor |
+| `CircuitBreaker` | Every method `synchronized`, including immutable-field getters; `LoadBalancingStrategy.select()` called `isAvailable()` on *every* backend in the pool on *every* request (~12 lock acquisitions/request across 10 breaker instances) | Dropped `synchronized` from getters over `final` fields; removed the redundant pool-wide `isAvailable()` pre-filter (the existing retry/exclusion mechanism already handles a rejected pick); rewrote state as `AtomicReference<StateHolder>` + `LongAdder` counters |
+
+`jdk.JavaMonitorEnter` events (3ms threshold, ~15-18s runs) dropped **626 → 469 → 186 →
+6** across these three fixes, ending with zero application-class contention. Throughput
+gain from locks alone: **10,708 → 12,349 rps** (+15%) — real, but smaller than expected;
+removing lock *wait* time doesn't remove the underlying CAS/allocation *compute* time
+(confirmed separately: bypassing the rate limiter's logic entirely, not just making it
+lock-free, reached 14,530 rps at the same core count — the gap is real per-request CPU
+cost, a separate budget from lock contention).
+
+### Transport and I/O
+
+- **Native Epoll** (`Epoll.isAvailable()`, falls back to NIO off Linux) — biggest effect
+  at low/moderate concurrency: at VUS=50, Epoll reached 14,396 rps immediately versus
+  NIO's 1,277 rps at the same VUS (NIO needed to ramp to VUS=1000 for comparable
+  throughput). Peak ceiling itself moved a more modest ~4-5%.
+- **Response-body streaming** — the backend-facing pipeline no longer runs
+  `HttpObjectAggregator`; responses stream to the client as they arrive
+  (`HttpResponse` → N×`HttpContent` → `LastHttpContent`) instead of being fully
+  buffered first. Request-body streaming was deliberately **not** done — the retry
+  mechanism resends the same request content to a different backend on failure, which
+  a consumed/streamed request body can't support without its own redesign; the actual
+  measured problem (large *response* bodies) never touched the request side. Cache
+  writes now cost zero extra copies for the common case (non-cacheable responses skip
+  the accumulator buffer entirely, versus always copying before). Validated on a 10MB
+  payload: ceiling ~220-245 rps, working out to ~2.2-2.5 GB/s — the *same* effective
+  byte rate as the earlier broken 1MB measurement (~1.7-2k rps ≈ 1.7-2 GB/s), meaning
+  throughput now scales with total bytes moved instead of collapsing on large payloads.
+  Streaming without backpressure can still OOM if a client drains slower than the
+  backend produces (Netty's per-channel outbound buffer has nothing capping it) — fixed
+  with a `channelWritabilityChanged` listener on the client-facing pipeline that pauses
+  reads from the backend (`setAutoRead(false)`) whenever the client's write buffer is
+  full.
+- **`SO_BACKLOG`** made explicit (`1024`, previously an implicit platform default) and
+  the `boss` `EventLoopGroup` downsized from Netty's default `2× cores` to a fixed 2
+  threads (it only accepts and hands off connections, `worker` does the real work).
+
+### Benchmark infra fixes (not gateway code, but they were hiding the real numbers)
+
+- **Python's dummy backend had a listen backlog of 5** (`socketserver.TCPServer
+  .request_queue_size`) — under concurrent load this reset connections regardless of
+  available CPU, producing `BrokenPipeError`s that looked like gateway instability.
+  Rewritten as a static Go binary (`benchmarks/dummy_backend.go`) with Go's `net/http`
+  (no artificially small backlog, no GIL) — eliminated the connection resets and
+  multi-second/30s-tail latency spikes entirely.
+- **Client/gateway/backend colocated on one benchmark machine** confounded early
+  core-count comparisons (16 cores never beat 8, because Netty sizes its thread count
+  to `2× cores` — more cores meant more gateway threads competing with the backends
+  and the k6 client for the same finite CPU, not complementary parallelism). Fixed
+  with explicit `taskset` core partitioning between the three components.
+- **`Router.match()`** was an unconditional `.stream().filter().max(...)` full scan on
+  every request — replaced with a plain `for` loop (same O(n) complexity; at this
+  project's realistic route counts, roughly a hundred, that's still microseconds — a
+  trie would only be worth the added complexity at route counts in the thousands).
+
+### Final result
+
+| Stage | Peak rps (8KB payload) |
+|---|---|
+| Baseline | 10,708 |
+| + cache lock fix | 12,349 |
+| + Epoll + response streaming + Go backend + CPU isolation | 15,146 |
+| + `Router` for-loop + `SO_BACKLOG` + boss thread sizing + backpressure fix | 17,968 |
+| + `LoadBalancingStrategy` stream removed, cached Micrometer `Counter`/`Timer`, header reuse | **19,610** |
+
+Repeated runs of the same final config swung from ~16,000 to ~19,610 rps run-to-run on
+the benchmark VM alone (JIT/GC nondeterminism plus hypervisor-level scheduling noise,
+confirmed by re-running the identical config three times back to back) — treat any single
+number here as a sample from that range, not an exact constant. **+83% peak throughput**
+(best observed run) over the pre-Week-11 baseline, JFR-verified to zero application-level
+lock contention, zero
+errors/leaks across a 400-request concurrent smoke test plus the full VUS staircase.
+Beyond this point the remaining levers (JVM/GC flags, allocator tuning) are single-digit
+percentage items, not another step-function win — getting meaningfully further on one
+instance would mean moving off Netty's object model entirely, which isn't a reasonable
+scope for this project. The standard next lever for more aggregate throughput is
+horizontal scaling (multiple gateway instances behind a load balancer), not further
+single-instance optimization. Full investigation notes, JFR commands, and every
+intermediate measurement: [`benchmarks/results/week11-rps-ceiling-notes.md`](../benchmarks/results/week11-rps-ceiling-notes.md).
+
 ## Methodology
 
 - **The client-side `sleep(0.1)` was removed.** With it, 50 VUs cannot exceed ~500 rps no
@@ -188,6 +283,10 @@ k6 run -e TARGET_URL=http://localhost:1221/api/movies -e VUS=20 -e DURATION=30s 
 ```
 
 Each run saves a full-detail JSON summary to `benchmarks/results/<timestamp>.json` for
-comparing performance across changes. `benchmarks/dummy_backend.py` is a minimal
-fixed-response Python server useful for generating a clean baseline against a uniform
-backend pool (bypassing real backend variance).
+comparing performance across changes. `benchmarks/dummy_backend.go` is a minimal
+fixed-response server (compile with `CGO_ENABLED=0 go build`, then run the static
+binary directly — no Go runtime needed on the target machine) useful for generating a
+clean baseline against a uniform backend pool, bypassing real backend variance. It
+replaced an earlier Python version whose default TCP listen backlog (5) reset
+connections under concurrent load regardless of available CPU — see the Week 11
+section above.

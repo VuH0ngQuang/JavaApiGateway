@@ -14,4 +14,5 @@ public interface ResponseCache {
     long sizeInBytes();
     int entryCount();
     void logStats();
+    long maxBytes();
 }
