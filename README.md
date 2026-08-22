@@ -26,7 +26,7 @@ distributed systems, and observability by building rather than reading about the
   slow client can't grow the gateway's memory unbounded), and a lock-free rate limiter
   and circuit breaker (no `synchronized`/`ReentrantLock` on the hot path). **+83%
   peak throughput** over the pre-Week-11 baseline, JFR-verified to zero lock
-  contention — see [`docs/performance.md`](docs/performance.md#week-11-performance-optimization).
+  contention — see [`docs/performance.md`](docs/performance.md#week-11-83-peak-throughput).
 
 Details are split out rather than kept in one file — see the table below.
 
