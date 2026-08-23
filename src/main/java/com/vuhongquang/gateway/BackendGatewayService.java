@@ -29,6 +29,9 @@ import java.net.InetSocketAddress;
 
 import java.nio.charset.StandardCharsets;
 
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
 
@@ -41,12 +44,18 @@ public class BackendGatewayService {
     private final ConnectionPoolManager poolManager;
     private final HealthChecker healthChecker;
     private final PrometheusMeterRegistry registry;
+    private final GatewayStateStore stateStore;
 
-    public BackendGatewayService(Router router, ConnectionPoolManager poolManager, HealthChecker healthChecker, PrometheusMeterRegistry registry) {
+    public BackendGatewayService(Router router,
+                                 ConnectionPoolManager poolManager,
+                                 HealthChecker healthChecker,
+                                 PrometheusMeterRegistry registry,
+                                 GatewayStateStore stateStore) {
         this.router = router;
         this.poolManager = poolManager;
         this.healthChecker = healthChecker;
         this.registry = registry;
+        this.stateStore = stateStore;
     }
 
     public void handler(ChannelHandlerContext ctx, FullHttpRequest req) {
@@ -121,6 +130,7 @@ public class BackendGatewayService {
                 CircuitBreaker newBreaker = new CircuitBreaker(openDurationMs, failureRateThreshold, minimumCalls, windowSize);
                 be.setBreaker(newBreaker);
             }
+            persistState();
             sendSuccess(ctx, req);
         } catch (Exception e) {
             log.error("error while patch backend to route {}: {}", route, e.toString());
@@ -152,6 +162,7 @@ public class BackendGatewayService {
             backendPool.removeBackend(be);
             poolManager.deleteBackend(be);
             healthChecker.deleteBackend(be);
+            persistState();
             sendSuccess(ctx, req);
         } catch (Exception e) {
             log.error("error while delete backend to route {}: {}", route, e.toString());
@@ -164,33 +175,34 @@ public class BackendGatewayService {
         try {
             AddBackendRequest beReq =  validateJson(ByteBufUtil.getBytes(req.content()), AddBackendRequest.class);
             if (beReq == null) {
+                log.warn("request contains empty data");
                 sendError(ctx, req, HttpResponseStatus.BAD_REQUEST);
                 return;
             }
             route = beReq.route();
-            BackendPool backendPool = router.getExact(beReq.route());
-            if (backendPool == null) {
-                LoadBalancingStrategy strategy = resolveStrategy(beReq.strategy());
-                if (strategy == null) {
-                    sendError(ctx, req, HttpResponseStatus.BAD_REQUEST);
-                    return;
-                }
-                backendPool = createNewPool(beReq.route(), strategy);
-            }
-            Backend be = new Backend(
-                    new InetSocketAddress(beReq.host(), beReq.port()),
-                    new CircuitBreaker(beReq.openDurationMs(),
-                            beReq.failureRateThreshold(),
-                            beReq.minimumCalls(),
-                            beReq.windowSize()
-                    ),
-                    registry
-            );
-            addToPool(backendPool, be);
+            registerBackend(beReq);
+            persistState();
             sendSuccess(ctx, req);
         } catch (Exception e) {
             log.error("error while add new backend to route {}: {}", route,e.toString());
             sendError(ctx, req, HttpResponseStatus.INTERNAL_SERVER_ERROR);
+        }
+    }
+
+    public void restoreBackend() {
+        List<AddBackendRequest> snapshot;
+        try {
+            snapshot = stateStore.load();
+        } catch (IOException e) {
+            log.error("Failed to load gateway state, starting with no backends: {}", e.toString());
+            return;
+        }
+        for (AddBackendRequest beReq : snapshot) {
+            try {
+                registerBackend(beReq);
+            } catch (Exception e) {
+                log.error("Failed to restore backend for route {}: {}", beReq.route(), e.toString());
+            }
         }
     }
 
@@ -204,6 +216,68 @@ public class BackendGatewayService {
         res.headers().set(HttpHeaderNames.CONTENT_TYPE, PrometheusTextFormatWriter.CONTENT_TYPE);
         res.headers().set(HttpHeaderNames.CONTENT_LENGTH, body.length);
         ctx.writeAndFlush(res);
+    }
+
+    // Thêm hàm persistState() — duyệt router.routes() → mỗi pool → mỗi backend,
+    // dựng lại List<AddBackendRequest>,
+    // gọi stateStore.save(...).
+    // Gọi hàm này ở cuối cả 3 handler addBackend, patchBackend, deleteBackend (ngay trước sendSuccess),
+    // vì cả 3 đều làm thay đổi state cần lưu lại.
+    private void persistState() {
+        try {
+            ArrayList<AddBackendRequest> copyBackends = new ArrayList<>();
+            for (Map.Entry<String, BackendPool> poolEntry : router.routes().entrySet()) {
+                String route = poolEntry.getKey();
+                BackendPool pool = poolEntry.getValue();
+                List<Backend> backends = pool.backends();
+                for (Backend be : backends) {
+                    CircuitBreaker breaker = be.getBreaker();
+                    LoadBalancingStrategy strategy = pool.strategy();
+                    Optional<StrategyType> strategyId = StrategyType.fromStrategy(strategy);
+                    if (strategyId.isEmpty()) {
+                        throw new IllegalStateException("Route " + route + " uses a LoadBalancingStrategy not registered in StrategyType: " + strategy.getClass());
+                    }
+                    AddBackendRequest request = new AddBackendRequest(route,
+                            be.address().getHostName(),
+                            be.address().getPort(),
+                            breaker.openDurationMs(),
+                            breaker.failureRateThreshold(),
+                            breaker.minimumCalls(),
+                            breaker.windowSize(),
+                            strategyId.get().getId()
+                    );
+                    copyBackends.add(request);
+                }
+            }
+            stateStore.save(copyBackends);
+        } catch (Exception e) {
+            log.error("Failed to persist gateway state: {}", e.toString());
+        }
+    }
+
+    private void registerBackend(AddBackendRequest beReq) {
+        if (beReq == null) {
+            throw new IllegalArgumentException("registerBackend called with a null request");
+        }
+        String route = beReq.route();
+        BackendPool backendPool = router.getExact(route);
+        if (backendPool == null) {
+            Optional<StrategyType> strategy = StrategyType.fromId(beReq.strategy());
+            if (strategy.isEmpty()) {
+                throw new IllegalArgumentException("unknown strategy id: " + beReq.strategy());
+            }
+            backendPool = createNewPool(route, strategy.get().create());
+        }
+        Backend be = new Backend(
+                new InetSocketAddress(beReq.host(), beReq.port()),
+                new CircuitBreaker(beReq.openDurationMs(),
+                        beReq.failureRateThreshold(),
+                        beReq.minimumCalls(),
+                        beReq.windowSize()
+                ),
+                registry
+        );
+        addToPool(backendPool, be);
     }
 
     private <T> T validateJson(byte[] json, Class<T> tClass) {
@@ -244,13 +318,5 @@ public class BackendGatewayService {
         pool.addBackend(be);
         poolManager.addBackend(be);
         healthChecker.addBackend(be);
-    }
-
-    private LoadBalancingStrategy resolveStrategy(int id) {
-        return switch (id) {
-            case 0 -> new LeastConnectionsStrategy();
-            case 1 -> new RoundRobinStrategy();
-            default -> null;
-        };
     }
 }

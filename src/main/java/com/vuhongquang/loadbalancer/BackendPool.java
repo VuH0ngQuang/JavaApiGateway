@@ -4,6 +4,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.HashSet;
+import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -45,6 +46,14 @@ public class BackendPool {
                 .stream()
                 .filter(b -> (b.address().getHostString()+":"+b.address().getPort()).equals(hostPort))
                 .findFirst();
+    }
+
+    public List<Backend> backends() {
+        return List.copyOf(backends);
+    }
+
+    public LoadBalancingStrategy strategy() {
+        return strategy;
     }
 
     public void removeBackend (Backend backend) {

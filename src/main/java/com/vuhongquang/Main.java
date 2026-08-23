@@ -4,6 +4,7 @@ import com.vuhongquang.cache.LruResponseCache;
 import com.vuhongquang.cache.ResponseCache;
 import com.vuhongquang.gateway.BackendGatewayService;
 import com.vuhongquang.forwarding.RequestForwarder;
+import com.vuhongquang.gateway.GatewayStateStore;
 import com.vuhongquang.health.HealthChecker;
 import com.vuhongquang.pool.ConnectionPoolManager;
 import com.vuhongquang.ratelimit.tokenbucket.TokenBucketLimiter;
@@ -25,13 +26,14 @@ import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
 
+import java.io.IOException;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 
 public class Main {
-    public static void main(String[] args) throws InterruptedException {
+    public static void main(String[] args) throws InterruptedException, IOException {
 
         //check Epoll is available
         boolean useEpoll = Epoll.isAvailable();
@@ -48,19 +50,19 @@ public class Main {
         final Router router = new Router(new ConcurrentHashMap<>());
         final ConnectionPoolManager manager = new ConnectionPoolManager(List.of(), worker, config.maxConnections(), config.acquireTimeoutMs(), registry, clientChannelClass);
         final RequestForwarder forwarder = new RequestForwarder(router, manager, cache, registry);
-        final BackendGatewayService gatewayService = new BackendGatewayService(router, manager, healthChecker, registry);
+        final GatewayStateStore stateStore = new GatewayStateStore(config.stateDir(),config.stateRetentionCount());
+        final BackendGatewayService gatewayService = new BackendGatewayService(router, manager, healthChecker, registry, stateStore);
         final TokenBucketLimiter limiter = new TokenBucketLimiter(
                 config.rateLimitCapacity(),
                 config.rateLimitWindowMs(),
                 config.rateLimitIntervalMs(),
                 worker
         );
-
         GatewayServer server = new GatewayServer(boss, worker, config.serverPort(), forwarder, gatewayService, limiter, registry, serverChannelClass);
         worker.scheduleAtFixedRate(cache::logStats, 10, 10, TimeUnit.SECONDS);
         limiter.start();
         healthChecker.start();
-
+        gatewayService.restoreBackend();
         try {
             server.start();
         } finally {

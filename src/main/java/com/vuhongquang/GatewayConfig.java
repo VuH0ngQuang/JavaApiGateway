@@ -8,7 +8,9 @@ public record GatewayConfig(
         int cacheMaxEntries,
         int rateLimitCapacity,
         long rateLimitWindowMs,
-        long rateLimitIntervalMs
+        long rateLimitIntervalMs,
+        String stateDir,
+        int stateRetentionCount
 ) {
     public static GatewayConfig defaults() {
         return new GatewayConfig(
@@ -19,7 +21,9 @@ public record GatewayConfig(
                 5000,
                 100_000_000,
                 60_000,
-                60_000
+                60_000,
+                "snapshot",
+                20
         );
     }
 }

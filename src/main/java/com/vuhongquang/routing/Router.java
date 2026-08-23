@@ -5,9 +5,7 @@ import com.vuhongquang.loadbalancer.BackendPool;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.Collection;
-import java.util.Comparator;
-import java.util.Optional;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 public class Router {
@@ -56,5 +54,9 @@ public class Router {
         } else {
             routes.put(uri, pool);
         }
+    }
+
+    public Map<String, BackendPool> routes() {
+        return Collections.unmodifiableMap(routes);
     }
 }

@@ -62,7 +62,19 @@ Native Epoll on Linux (`Epoll.isAvailable()`, falls back to NIO) — see
 |---|---|
 | `GatewayHandler` | Path dispatch only: `/gateway/metrics` vs `/gateway/backends*` |
 | `BackendGatewayService` | Admin API logic — see [`api.md`](api.md) |
+| `GatewayStateStore` | Persists backend/route config to `snapshot/gateway-state-<timestamp>.json` on every mutation, loaded back on boot |
 | `gateway.request.*` | Jackson request records; `PatchBackendRequest` uses boxed types so `null` = "field omitted" |
+
+**State persistence** — `BackendGatewayService` calls `persistState()` after every
+successful add/patch/delete, writing the full current snapshot (`List<AddBackendRequest>`,
+rebuilt from `Router.routes()`) to a new timestamped file (never overwritten — a crash
+mid-write only corrupts the newest file, not history). `GatewayStateStore.save()` writes
+to a `.tmp` file then `Files.move(..., ATOMIC_MOVE)`s it into place, and prunes down to
+the configured `stateRetentionCount` (`GatewayConfig`) oldest-first. On boot, `Main` calls
+`gatewayService.restoreBackend()`, which loads the newest file and replays each entry
+through the same `registerBackend()` path the admin API uses — if the newest file is
+corrupt (partial write from a crash), `load()` falls back to the next-newest, giving
+automatic rollback for free.
 
 ## `loadbalancer` package
 
@@ -72,6 +84,7 @@ Native Epoll on Linux (`Epoll.isAvailable()`, falls back to NIO) — see
 | `LoadBalancingStrategy` | Template method; connection-count bookkeeping lives in `select()`, not `doSelect()`. Pool-wide `isAvailable()` pre-filter removed in Week 11 (JFR-measured lock contention) |
 | `RoundRobinStrategy` / `LeastConnectionsStrategy` | Both use a rotating `AtomicInteger` start index to avoid tie-starvation |
 | `Backend` | Address + swappable `CircuitBreaker` + `AtomicInteger` connections + `volatile healthy`; self-registers its gauges |
+| `StrategyType` | Enum mapping the admin API's `strategy` int ↔ a strategy *factory* (`Supplier<LoadBalancingStrategy>`), used by both `registerBackend` (id → new instance) and `persistState` (instance's class → id). A factory, not a shared instance — each `RoundRobinStrategy`/`LeastConnectionsStrategy` carries its own `AtomicInteger` index, so reusing one instance across pools would leak rotation state between unrelated routes |
 
 ## `routing` package
 

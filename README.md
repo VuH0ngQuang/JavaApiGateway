@@ -20,7 +20,10 @@ distributed systems, and observability by building rather than reading about the
 - **Observability** via Micrometer/Prometheus: request count, latency-by-status (also
   the error-rate signal), per-backend active-connection and health gauges.
 - **Dynamic configuration** — backends and routes are created, patched, and deleted at
-  runtime through an admin API; `Main` boots with zero hardcoded backends.
+  runtime through an admin API; `Main` boots with zero hardcoded backends. **Survives
+  restarts** — every mutation writes a timestamped snapshot to disk, and the latest one
+  is auto-replayed on boot (falling back to the next-newest if the latest is corrupt from
+  a crash mid-write).
 - **Performance-tuned request path** — native Epoll transport (falls back to NIO off
   Linux), response-body streaming (no full-response buffering, with backpressure so a
   slow client can't grow the gateway's memory unbounded), and a lock-free rate limiter
@@ -68,8 +71,10 @@ mvn compile
 mvn exec:java -Dexec.mainClass=com.vuhongquang.Main
 ```
 
-The gateway listens on `localhost:1221` with **no backends and no routes configured** —
-everything is created through the admin API at runtime (Week 10):
+The gateway listens on `localhost:1221`. On first boot there are **no backends and no
+routes configured** — everything is created through the admin API at runtime (Week 10).
+On later boots, whatever was configured last is **automatically restored** from
+`snapshot/` (see [`docs/architecture.md`](docs/architecture.md#gateway-package)):
 
 ```bash
 curl -X POST localhost:1221/gateway/backends \
