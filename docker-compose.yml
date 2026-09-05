@@ -1,0 +1,36 @@
+services:
+  gateway:
+    build: .
+    ports:
+      - "1221:1221"
+    volumes:
+      # GatewayConfig.defaults()'s stateDir ("snapshot") is relative to the
+      # working directory (/app in the image) -- mounting it as a named volume
+      # means backend/route config survives `docker compose down && up` too,
+      # not just a container restart.
+      - gateway-state:/app/snapshot
+    depends_on:
+      - backend-a
+      - backend-b
+
+  # Two lightweight demo backends so `docker compose up` gives a working
+  # gateway out of the box, without needing a real service to point it at.
+  # Register them with the admin API once the stack is up:
+  #
+  #   curl -X POST localhost:1221/gateway/backends -H 'Content-Type: application/json' \
+  #     -d '{"route":"/echo","host":"backend-a","port":8080,"openDurationMs":5000,"failureRateThreshold":0.5,"minimumCalls":10,"windowSize":20,"strategy":0}'
+  #   curl -X POST localhost:1221/gateway/backends -H 'Content-Type: application/json' \
+  #     -d '{"route":"/echo","host":"backend-b","port":8080,"openDurationMs":5000,"failureRateThreshold":0.5,"minimumCalls":10,"windowSize":20,"strategy":0}'
+  #
+  # Compose's built-in DNS resolves "backend-a"/"backend-b" to the right
+  # container automatically -- no fixed IPs or extra networking config needed.
+  backend-a:
+    image: hashicorp/http-echo
+    command: ["-text=hello from backend-a", "-listen=:8080"]
+
+  backend-b:
+    image: hashicorp/http-echo
+    command: ["-text=hello from backend-b", "-listen=:8080"]
+
+volumes:
+  gateway-state:

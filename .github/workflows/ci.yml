@@ -1,0 +1,48 @@
+name: CI
+
+# Runs on every push and every PR targeting main -- so a PR shows red/green
+# checks before it's even merged, not just after.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      # Every workflow needs this first -- without it, the runner is an empty
+      # VM with no copy of your repo on it.
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # setup-java's cache: 'maven' input handles caching ~/.m2 between runs
+      # for you -- no separate actions/cache step needed, unlike many other
+      # ecosystems' setup actions.
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+          cache: 'maven'
+
+      - name: Build
+        run: mvn -B compile
+
+      - name: Test
+        run: mvn -B test
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+          cache: 'maven'
+      - name: Lint
+        run: mvn -B checkstyle:check

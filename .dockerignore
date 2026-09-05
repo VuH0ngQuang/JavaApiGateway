@@ -1,0 +1,8 @@
+target/
+snapshot/
+bench-kit/
+benchmarks/
+.git/
+.idea/
+.gitnexus/
+*.md

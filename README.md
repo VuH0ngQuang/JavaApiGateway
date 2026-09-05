@@ -86,6 +86,24 @@ curl localhost:1221/api/movies
 
 Full endpoint reference: [`docs/api.md`](docs/api.md).
 
+### Running with Docker
+
+```bash
+docker compose up -d --build
+```
+
+Starts the gateway plus 2 demo backends (`backend-a`/`backend-b`, `hashicorp/http-echo`).
+Register a route the same way as above, using the compose service names as `host`
+(Docker's built-in DNS resolves them):
+
+```bash
+curl -X POST localhost:1221/gateway/backends -H 'Content-Type: application/json' \
+  -d '{"route":"/echo","host":"backend-a","port":8080,"openDurationMs":5000,"failureRateThreshold":0.5,"minimumCalls":10,"windowSize":20,"strategy":0}'
+```
+
+Backend/route config persists in a named volume (`gateway-state`), so
+`docker compose restart gateway` (or a crash) doesn't lose it.
+
 ## Tech Stack
 
 - Java 21
