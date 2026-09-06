@@ -3,8 +3,15 @@
 ```mermaid
 flowchart TD
     Client([Client])
+    TLS{TLS configured?}
+    ALPN["SslHandler + Http2OrHttpHandler<br/><i>ALPN picks h2 or http/1.1 per-connection</i>"]
     Pipe["Netty pipeline<br/>HttpServerCodec → HttpObjectAggregator → GatewayHandler → BackendResponseHandler<br/><i>(request side only — responses stream back)</i>"]
-    Client --> Pipe
+    Client --> TLS
+    TLS -->|yes| ALPN
+    TLS -->|no, HTTP/1.1 only| Pipe
+    ALPN -->|http/1.1| Pipe
+    ALPN -->|h2| H2["Http2FrameCodec + Http2MultiplexHandler<br/><i>each stream → Http2StreamInitializer, same handlers as above</i>"]
+    H2 --> Pipe
 
     Pipe -->|"/gateway/*"| GH[GatewayHandler]
     GH --> BGS["BackendGatewayService<br/><i>admin API — see api.md</i>"]
@@ -39,8 +46,10 @@ Native Epoll on Linux (`Epoll.isAvailable()`, falls back to NIO) — see
 | Class | Role |
 |---|---|
 | `Main` | Builds shared singletons, wires them into `GatewayServer` |
-| `GatewayConfig` | Record of startup constants (port, pool limits, cache size, rate limit) |
-| `GatewayServer` | Owns `ServerBootstrap` + `EventLoopGroup`s + pipeline lifecycle |
+| `GatewayConfig` | Record of startup constants (port, pool limits, cache size, rate limit, TLS cert/key paths, max content length) |
+| `GatewayServer` | Owns `ServerBootstrap` + `EventLoopGroup`s + pipeline lifecycle. If a TLS cert is configured, prepends an `SslHandler` and `Http2OrHttpHandler`; otherwise wires the HTTP/1.1-only pipeline directly |
+| `Http2OrHttpHandler` | `ApplicationProtocolNegotiationHandler` — after ALPN completes, builds either the HTTP/2 pipeline (`Http2FrameCodec` + `Http2MultiplexHandler`) or the same HTTP/1.1 chain `GatewayServer` uses without TLS |
+| `Http2StreamInitializer` | Per-stream pipeline for HTTP/2 (`Http2MultiplexHandler` creates one virtual `Http2StreamChannel` per stream) — `Http2StreamFrameToHttpObjectCodec` translates HTTP/2 frames into the same `HttpObject`s the HTTP/1.1 path produces, so `GatewayHandler`/`BackendResponseHandler` need no HTTP/2-specific code |
 | `BackendResponseHandler` | Client-facing entry point: timer, request counter, rate-limit gate, delegates to `RequestForwarder` |
 
 ## `forwarding` package

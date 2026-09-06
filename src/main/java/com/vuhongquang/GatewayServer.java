@@ -12,9 +12,9 @@ import io.netty.channel.ChannelOption;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.socket.ServerSocketChannel;
 import io.netty.channel.socket.SocketChannel;
-import io.netty.channel.socket.nio.NioServerSocketChannel;
 import io.netty.handler.codec.http.HttpObjectAggregator;
 import io.netty.handler.codec.http.HttpServerCodec;
+import io.netty.handler.ssl.SslContext;
 
 public class GatewayServer {
     private final EventLoopGroup boss;
@@ -25,6 +25,8 @@ public class GatewayServer {
     private final RateLimiter limiter;
     private final PrometheusMeterRegistry registry;
     private final Class<? extends ServerSocketChannel> channelClass;
+    private final SslContext sslContext;
+    private final GatewayConfig config;
 
     public GatewayServer(EventLoopGroup boss,
                          EventLoopGroup worker,
@@ -33,7 +35,10 @@ public class GatewayServer {
                          BackendGatewayService gatewayService,
                          RateLimiter limiter,
                          PrometheusMeterRegistry registry,
-                         Class<? extends ServerSocketChannel> channelClass) {
+                         Class<? extends ServerSocketChannel> channelClass,
+                         SslContext sslContext,
+                         GatewayConfig config
+    ) {
         this.boss = boss;
         this.worker = worker;
         this.port = port;
@@ -42,6 +47,8 @@ public class GatewayServer {
         this.limiter = limiter;
         this.registry = registry;
         this.channelClass = channelClass;
+        this.sslContext = sslContext;
+        this.config = config;
     }
 
     public void start() throws InterruptedException {
@@ -52,12 +59,17 @@ public class GatewayServer {
                 .childHandler(new ChannelInitializer<SocketChannel>() {
                     @Override
                     protected void initChannel(SocketChannel ch) {
-                        ch.pipeline().addLast(
-                                new HttpServerCodec(),
-                                new HttpObjectAggregator(64 * 1024 * 1024),
-                                new GatewayHandler(gatewayService),
-                                new BackendResponseHandler(forwarder, limiter, registry)
-                        );
+                        if (sslContext != null) {
+                            ch.pipeline().addLast(sslContext.newHandler(ch.alloc()));
+                            ch.pipeline().addLast(new Http2OrHttpHandler(forwarder, gatewayService, limiter, registry, config));
+                        } else {
+                            ch.pipeline().addLast(
+                                    new HttpServerCodec(),
+                                    new HttpObjectAggregator(config.maxContentLength()),
+                                    new GatewayHandler(gatewayService),
+                                    new BackendResponseHandler(forwarder, limiter, registry)
+                            );
+                        }
                     }
                 })
                 .bind(port)

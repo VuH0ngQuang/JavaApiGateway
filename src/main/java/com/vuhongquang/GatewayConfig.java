@@ -10,7 +10,10 @@ public record GatewayConfig(
         long rateLimitWindowMs,
         long rateLimitIntervalMs,
         String stateDir,
-        int stateRetentionCount
+        int stateRetentionCount,
+        String tlsCertPath,
+        String tlsKeyPath,
+        int maxContentLength
 ) {
     public static GatewayConfig defaults() {
         return new GatewayConfig(
@@ -23,7 +26,10 @@ public record GatewayConfig(
                 60_000,
                 60_000,
                 "snapshot",
-                20
+                20,
+                "",
+                "",
+                64 * 1024 * 1024
         );
     }
 }

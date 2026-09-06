@@ -25,7 +25,12 @@ import io.netty.channel.socket.ServerSocketChannel;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
+import io.netty.handler.ssl.ApplicationProtocolConfig;
+import io.netty.handler.ssl.ApplicationProtocolNames;
+import io.netty.handler.ssl.SslContext;
+import io.netty.handler.ssl.SslContextBuilder;
 
+import java.io.File;
 import java.io.IOException;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
@@ -58,11 +63,40 @@ public class Main {
                 config.rateLimitIntervalMs(),
                 worker
         );
-        GatewayServer server = new GatewayServer(boss, worker, config.serverPort(), forwarder, gatewayService, limiter, registry, serverChannelClass);
+
+        //check ssl
+        SslContext sslContext = null;
+        if (config.tlsCertPath() != null && config.tlsKeyPath() != null && !config.tlsCertPath().isBlank() && !config.tlsKeyPath().isBlank()) {
+            sslContext = SslContextBuilder.forServer(
+                    new File(config.tlsCertPath()),
+                    new File(config.tlsKeyPath())
+            ).applicationProtocolConfig(
+                    new ApplicationProtocolConfig(
+                            ApplicationProtocolConfig.Protocol.ALPN,
+                            ApplicationProtocolConfig.SelectorFailureBehavior.NO_ADVERTISE,
+                            ApplicationProtocolConfig.SelectedListenerFailureBehavior.ACCEPT,
+                            ApplicationProtocolNames.HTTP_2,
+                            ApplicationProtocolNames.HTTP_1_1
+            )).build();
+        }
+
+        GatewayServer server = new GatewayServer(
+                boss,
+                worker,
+                config.serverPort(),
+                forwarder,
+                gatewayService,
+                limiter,
+                registry,
+                serverChannelClass,
+                sslContext,
+                config
+        );
         worker.scheduleAtFixedRate(cache::logStats, 10, 10, TimeUnit.SECONDS);
         limiter.start();
         healthChecker.start();
         gatewayService.restoreBackend();
+
         try {
             server.start();
         } finally {

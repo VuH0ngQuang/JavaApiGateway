@@ -30,6 +30,10 @@ distributed systems, and observability by building rather than reading about the
   and circuit breaker (no `synchronized`/`ReentrantLock` on the hot path). **+83%
   peak throughput** over the pre-Week-11 baseline, JFR-verified to zero lock
   contention — see [`docs/performance.md`](docs/performance.md#week-11-83-peak-throughput).
+- **TLS + HTTP/2**, negotiated via ALPN on the same port — HTTP/2 frames are translated
+  back into the same `HttpObject`s the HTTP/1.1 path already handles, so the entire
+  proxy/routing/rate-limit/cache logic is shared between both protocols unchanged.
+  Off by default (no cert configured); HTTP/1.1-only when disabled.
 
 Details are split out rather than kept in one file — see the table below.
 
@@ -45,7 +49,7 @@ Details are split out rather than kept in one file — see the table below.
 
 ## Status
 
-Through **Week 11** of the roadmap.
+Through **Week 12** — the full 12-week roadmap is complete.
 
 | Week | Topic | Status |
 |------|-------|--------|
@@ -60,7 +64,7 @@ Through **Week 11** of the roadmap.
 | 9 | Observability (Prometheus/Micrometer metrics) | ✅ |
 | 10 | Dynamic Configuration (admin API — add/patch/delete backends & routes) | ✅ |
 | 11 | Performance Optimization (Epoll, streaming, lock-free rate limit/circuit breaker) | ✅ |
-| 12 | Production Ready (Docker, CI/CD, docs) | ⬜ |
+| 12 | Production Ready (Docker, CI/CD, docs, unit tests) | ✅ |
 
 ## Running
 
@@ -85,6 +89,13 @@ curl localhost:1221/api/movies
 ```
 
 Full endpoint reference: [`docs/api.md`](docs/api.md).
+
+### Enabling TLS / HTTP/2
+
+Set `tlsCertPath`/`tlsKeyPath` in `GatewayConfig.defaults()` to a cert/key pair (PEM,
+unencrypted private key). Once set, the gateway serves HTTPS on the same port, and
+negotiates HTTP/2 vs HTTP/1.1 per-connection via ALPN — no separate port or config
+needed per protocol.
 
 ### Running with Docker
 
