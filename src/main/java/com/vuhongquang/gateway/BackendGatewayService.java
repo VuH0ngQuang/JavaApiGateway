@@ -129,6 +129,7 @@ public class BackendGatewayService {
                 }
                 CircuitBreaker newBreaker = new CircuitBreaker(openDurationMs, failureRateThreshold, minimumCalls, windowSize);
                 be.setBreaker(newBreaker);
+                log.info("Backend {} on route {} reconfigured (breaker in-flight state reset)", id, route);
             }
             persistState();
             sendSuccess(ctx, req);
@@ -163,6 +164,7 @@ public class BackendGatewayService {
             poolManager.deleteBackend(be);
             healthChecker.deleteBackend(be);
             persistState();
+            log.info("Backend {} removed from route {}", id, route);
             sendSuccess(ctx, req);
         } catch (Exception e) {
             log.error("error while delete backend to route {}: {}", route, e.toString());
@@ -182,6 +184,7 @@ public class BackendGatewayService {
             route = beReq.route();
             registerBackend(beReq);
             persistState();
+            log.info("Backend {}:{} added to route {}", beReq.host(), beReq.port(), route);
             sendSuccess(ctx, req);
         } catch (Exception e) {
             log.error("error while add new backend to route {}: {}", route,e.toString());
@@ -204,6 +207,7 @@ public class BackendGatewayService {
                 log.error("Failed to restore backend for route {}: {}", beReq.route(), e.toString());
             }
         }
+        log.info("Restored {} backend(s) from snapshot", snapshot.size());
     }
 
     public void getMetrics (ChannelHandlerContext ctx, FullHttpRequest req) {
@@ -244,7 +248,8 @@ public class BackendGatewayService {
                             breaker.failureRateThreshold(),
                             breaker.minimumCalls(),
                             breaker.windowSize(),
-                            strategyId.get().getId()
+                            strategyId.get().getId(),
+                            pool.isForceStream()
                     );
                     copyBackends.add(request);
                 }
@@ -266,7 +271,7 @@ public class BackendGatewayService {
             if (strategy.isEmpty()) {
                 throw new IllegalArgumentException("unknown strategy id: " + beReq.strategy());
             }
-            backendPool = createNewPool(route, strategy.get().create());
+            backendPool = createNewPool(route, strategy.get().create(), beReq.forceStream());
         }
         Backend be = new Backend(
                 new InetSocketAddress(beReq.host(), beReq.port()),
@@ -308,15 +313,15 @@ public class BackendGatewayService {
         ctx.writeAndFlush(res);
     }
 
-    private BackendPool createNewPool(String route, LoadBalancingStrategy loadBalancingStrategy) {
-        BackendPool pool = new BackendPool(new CopyOnWriteArrayList<>(), loadBalancingStrategy);
+    private BackendPool createNewPool(String route, LoadBalancingStrategy loadBalancingStrategy, boolean forceStream) {
+        BackendPool pool = new BackendPool(new CopyOnWriteArrayList<>(), loadBalancingStrategy, forceStream);
         router.register(route, pool);
         return pool;
     }
 
     private void addToPool(BackendPool pool, Backend be) {
-        pool.addBackend(be);
         poolManager.addBackend(be);
         healthChecker.addBackend(be);
+        pool.addBackend(be);
     }
 }

@@ -3,8 +3,12 @@ package com.vuhongquang.gateway;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.SimpleChannelInboundHandler;
 import io.netty.handler.codec.http.*;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class GatewayHandler extends SimpleChannelInboundHandler<FullHttpRequest> {
+
+    private static final Logger log = LoggerFactory.getLogger(GatewayHandler.class);
 
     private final BackendGatewayService gatewayService;
 
@@ -24,6 +28,7 @@ public class GatewayHandler extends SimpleChannelInboundHandler<FullHttpRequest>
                 gatewayService.getMetrics(ctx, msg);
                 return;
             }
+            log.warn("Unknown gateway admin path: {} {}", msg.method(), uri);
             var errRes = new DefaultFullHttpResponse(msg.protocolVersion(), HttpResponseStatus.NOT_FOUND);
             errRes.headers().set(HttpHeaderNames.CONTENT_LENGTH, 0);
             ctx.writeAndFlush(errRes);

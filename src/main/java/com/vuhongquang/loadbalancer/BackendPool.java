@@ -15,10 +15,12 @@ public class BackendPool {
 
     private final CopyOnWriteArrayList<Backend> backends;
     private final LoadBalancingStrategy strategy;
+    private final boolean forceStream;
 
-    public BackendPool(CopyOnWriteArrayList<Backend> backends, LoadBalancingStrategy strategy) {
+    public BackendPool(CopyOnWriteArrayList<Backend> backends, LoadBalancingStrategy strategy, boolean forceStream) {
         this.backends = backends;
         this.strategy = strategy;
+        this.forceStream = forceStream;
     }
 
     public Backend select(Set<Backend> excluded) {
@@ -59,4 +61,6 @@ public class BackendPool {
     public void removeBackend (Backend backend) {
         backends.remove(backend);
     }
+
+    public boolean isForceStream() {return forceStream;}
 }

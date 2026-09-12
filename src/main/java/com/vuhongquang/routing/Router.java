@@ -19,7 +19,7 @@ public class Router {
 
     public BackendPool match(String uri) {
         if (routes.isEmpty()) {
-            log.error("Routes is empty");
+            log.warn("Routes is empty");
             return null;
         }
         String key = null;
@@ -37,7 +37,7 @@ public class Router {
 
     public BackendPool getExact(String uri) {
         if (routes.isEmpty()) {
-            log.error("Routes is empty");
+            log.warn("Routes is empty");
             return null;
         }
         BackendPool pool = routes.get(uri);

@@ -10,7 +10,8 @@ public record AddBackendRequest(
         double failureRateThreshold,
         int minimumCalls,
         int windowSize,
-        int strategy // 0: least_connections    1: round_robin
+        int strategy, // 0: least_connections    1: round_robin
+        boolean forceStream
 ) {
     public AddBackendRequest {
         Objects.requireNonNull(route);

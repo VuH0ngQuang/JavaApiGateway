@@ -18,11 +18,14 @@ import io.netty.util.concurrent.Future;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Consumer;
 
 public class RequestForwarder {
     private static final Logger log = LoggerFactory.getLogger(RequestForwarder.class);
@@ -33,12 +36,14 @@ public class RequestForwarder {
     private final PrometheusMeterRegistry registry;
 
     private final ConcurrentHashMap<Integer, Timer> timerCache = new ConcurrentHashMap<>();
+    private final AtomicInteger activeStreams = new AtomicInteger(0);
 
     public RequestForwarder(Router router, ConnectionPoolManager manager, ResponseCache cache, PrometheusMeterRegistry registry) {
         this.router = router;
         this.manager = manager;
         this.cache = cache;
         this.registry = registry;
+        registry.gauge("gateway_active_streaming_requests", activeStreams);
     }
 
     public void forward(
@@ -85,6 +90,15 @@ public class RequestForwarder {
         ctx.writeAndFlush(errRes);
     }
 
+    private void sendError(ChannelHandlerContext ctx,
+                           HttpVersion version,
+                           HttpResponseStatus status
+    ) {
+        var errRes = new DefaultFullHttpResponse(version, status);
+        errRes.headers().set(HttpHeaderNames.CONTENT_LENGTH, 0);
+        ctx.writeAndFlush(errRes);
+    }
+
     private void finishExchange(
             AtomicBoolean done,
             Backend backend,
@@ -99,6 +113,30 @@ public class RequestForwarder {
             return;
         }
         stopTimer(time, status);
+        finishExchangeCore(backend, pool, ch, handler, success);
+    }
+
+    private void finishExchange(
+            AtomicBoolean done,
+            Backend backend,
+            ConnectionPool pool,
+            Channel ch,
+            ChannelHandler handler,
+            boolean success
+    ) {
+        if (!done.compareAndSet(false, true)) {
+            return;
+        }
+        finishExchangeCore(backend, pool, ch, handler, success);
+    }
+
+    private void finishExchangeCore(
+            Backend backend,
+            ConnectionPool pool,
+            Channel ch,
+            ChannelHandler handler,
+            boolean success
+    ) {
         if (success) {
             backend.getBreaker().recordSuccess();
         } else {
@@ -141,14 +179,14 @@ public class RequestForwarder {
         }
 
         if (backend == null) {
-            log.error("x- Failed to reach backend for {} {}: There is no healthy Backend", msg.method(), msg.uri());
+            log.error("x- Failed to reach backend for {} {}: no eligible backend (pool empty, all unhealthy, or circuit open)", msg.method(), msg.uri());
             var status = HttpResponseStatus.SERVICE_UNAVAILABLE;
             sendError(ctx, msg, status);
             stopTimer(time, status);
             return;
         }
 
-        var request = new DefaultFullHttpRequest(
+        var req = new DefaultFullHttpRequest(
                 msg.protocolVersion(),
                 msg.method(),
                 msg.uri(),
@@ -156,8 +194,8 @@ public class RequestForwarder {
                 msg.headers(),
                 msg.trailingHeaders()
         );
-        request.headers().set(HttpHeaderNames.HOST, backend.address().getHostName());
-        request.headers().set("X-Forwarded-For", clientIp);
+        req.headers().set(HttpHeaderNames.HOST, backend.address().getHostName());
+        req.headers().set("X-Forwarded-For", clientIp);
 
         final HttpMethod method = msg.method();
         final String uri = msg.uri();
@@ -167,7 +205,7 @@ public class RequestForwarder {
             if (!future.isSuccess()) {
                 Throwable cause = future.cause();
                 HttpResponseStatus status;
-                request.release();
+                req.release();
                 backend.decrementConnections();
                 backend.getBreaker().recordFailure();
                 if (attemptsLeft > 1) {
@@ -190,46 +228,12 @@ public class RequestForwarder {
 
             AtomicBoolean done = new AtomicBoolean(false);
 
-//            SimpleChannelInboundHandler<FullHttpResponse> responseHandler =
-//                    new SimpleChannelInboundHandler<>() {
-//                        @Override
-//                        protected void channelRead0(ChannelHandlerContext backendCtx, FullHttpResponse res) {
-//                            log.info("<- {} ({} bytes) from backend {} for {} {}",
-//                                    res.status(), res.content().readableBytes(),
-//                                    backend.address(), method, uri);
-//                            res.retain();
-//                            if (cache.maxBytes() != 0 && cacheable && res.status() == HttpResponseStatus.OK) {
-//                                byte[] body = ByteBufUtil.getBytes(res.content());
-//                                cache.put(uri, res.status(), body, res.headers());
-//                            }
-//                            ctx.writeAndFlush(res);
-//                            msg.release();
-//                            finishExchange(done, backend, connectionPool, ch, this, true, time, res.status());
-//                        }
-//
-//                        @Override
-//                        public void channelInactive(ChannelHandlerContext backendCtx) {
-//                            log.error("x- Backend {} closed connection before responding to {} {}",
-//                                    backend.address(), method, uri);
-//                            sendError(ctx, msg, HttpResponseStatus.BAD_GATEWAY);
-//                            finishExchange(done, backend, connectionPool, ch, this, false, time, HttpResponseStatus.BAD_GATEWAY);
-//                        }
-//
-//                        @Override
-//                        public void exceptionCaught(ChannelHandlerContext backendCtx, Throwable cause) {
-//                            log.error("x- Error from backend {} for {} {}: {}",
-//                                    backend.address(), method, uri, cause.toString());
-//                            sendError(ctx, msg, HttpResponseStatus.BAD_GATEWAY);
-//                            finishExchange(done, backend, connectionPool, ch, this, false, time, HttpResponseStatus.BAD_GATEWAY);
-//                        }
-//                    };
-
             ChannelInboundHandlerAdapter responseHandler = new ChannelInboundHandlerAdapter() {
                 HttpResponseStatus status;
                 ByteBuf byteBuf;
                 HttpHeaders headers;
                 @Override
-                public void channelRead(ChannelHandlerContext backendCtx, Object backendMsg) throws Exception {
+                public void channelRead(ChannelHandlerContext backendCtx, Object backendMsg) {
                     try {
                         if (backendMsg instanceof HttpResponse res) {
                             status = res.status();
@@ -305,7 +309,7 @@ public class RequestForwarder {
 
 
             ch.pipeline().addLast("response", responseHandler);
-            ch.writeAndFlush(request).addListener((ChannelFuture wf) -> {
+            ch.writeAndFlush(req).addListener((ChannelFuture wf) -> {
                 if (!wf.isSuccess()) {
                     log.error("x- Failed to send request to backend {} for {} {}: {}",
                             backend.address(), method, uri, wf.cause().toString());
@@ -319,5 +323,127 @@ public class RequestForwarder {
     public void stopTimer(Timer.Sample time, HttpResponseStatus status) {
         Timer timer = timerCache.computeIfAbsent(status.code(), code -> registry.timer("gateway_request_duration_seconds", "status", String.valueOf(code)));
         time.stop(timer);
+    }
+
+    public void forwardStreaming(ChannelHandlerContext ctx,
+                                 HttpRequest headers,
+                                 ByteBuf initialContent,
+                                 String clientIp,
+                                 BackendPool pool,
+                                 Consumer<Channel> onBackendReady
+    ) {
+        final HttpMethod method = headers.method();
+        final String uri = headers.uri();
+
+        Backend be = pool.select(new HashSet<>());
+        if (be == null) {
+            log.error("x- Failed to reach backend for {} {}: no eligible backend (pool empty, all unhealthy, or circuit open)", method, uri);
+            sendError(ctx, headers.protocolVersion(), HttpResponseStatus.SERVICE_UNAVAILABLE);
+            initialContent.release();
+            onBackendReady.accept(null);
+            return;
+        }
+        activeStreams.incrementAndGet();
+
+        ConnectionPool connectionPool = manager.poolFor(be);
+        connectionPool.acquire().addListener((Future<Channel> future) -> {
+            if (!future.isSuccess()) {
+                Throwable cause = future.cause();
+                log.error("x- Failed to connect to backend {} for {} {}: {}", be.address(), method, uri, cause.toString());
+                sendError(ctx, headers.protocolVersion(), HttpResponseStatus.BAD_GATEWAY);
+                initialContent.release();
+                be.decrementConnections();
+                be.getBreaker().recordFailure();
+                activeStreams.decrementAndGet();
+                onBackendReady.accept(null);
+                return;
+            }
+
+            Channel beChannel = future.getNow();
+            AtomicBoolean done = new AtomicBoolean(false);
+            long startMs = System.currentTimeMillis();
+
+            ChannelInboundHandlerAdapter responseHandler = new ChannelInboundHandlerAdapter() {
+                HttpResponseStatus status;
+                @Override
+                public void channelRead(ChannelHandlerContext backendCtx, Object backendMsg) {
+                    try {
+                        if (backendMsg instanceof HttpResponse res) {
+                            status = res.status();
+                            if (ctx.pipeline().context("backpressure") != null) {
+                                ctx.pipeline().remove("backpressure");
+                            }
+                            ctx.pipeline().addLast("backpressure", new ChannelInboundHandlerAdapter() {
+                                @Override
+                                public void channelWritabilityChanged(ChannelHandlerContext clientCtx) {
+                                    beChannel.config().setAutoRead(clientCtx.channel().isWritable());
+                                }
+                            });
+                            ctx.writeAndFlush(res);
+                        }
+                        if (backendMsg instanceof HttpContent content) {
+                            ctx.writeAndFlush(content);
+                            if (backendMsg instanceof LastHttpContent) {
+                                log.info("<= {} streamed exchange for {} {} to backend {} in {}ms",
+                                        status, method, uri, be.address(), System.currentTimeMillis() - startMs);
+                                activeStreams.decrementAndGet();
+                                finishExchange(done, be, connectionPool, beChannel, this, true);
+                                if (ctx.pipeline().context("backpressure") != null) {
+                                    ctx.pipeline().remove("backpressure");
+                                }
+                            }
+                        }
+                    } catch (Exception e) {
+                        log.error("x- Unexpected error handling streamed response from backend {} for {} {}: {}", be.address(), method, uri, e.toString());
+                    }
+                }
+                @Override
+                public void channelInactive(ChannelHandlerContext backendCtx) {
+                    if (done.get()) return;
+                    if (status == null) {
+                        log.error("x- Backend {} closed connection before responding to streamed {} {}", be.address(), method, uri);
+                        sendError(ctx, headers.protocolVersion(), HttpResponseStatus.BAD_GATEWAY);
+                    } else {
+                        log.error("x- Backend {} closed connection mid-response to streamed {} {}", be.address(), method, uri);
+                        ctx.close();
+                    }
+                    activeStreams.decrementAndGet();
+                    finishExchange(done, be, connectionPool, beChannel, this, false);
+                    if (ctx.pipeline().context("backpressure") != null) {
+                        ctx.pipeline().remove("backpressure");
+                    }
+                }
+
+                @Override
+                public void exceptionCaught(ChannelHandlerContext backendCtx, Throwable cause) {
+                    if (done.get()) return;
+                    log.error("x- Error from backend {} for streamed {} {}: {}", be.address(), method, uri, cause.toString());
+                    if (status == null) {
+                        sendError(ctx, headers.protocolVersion(), HttpResponseStatus.BAD_GATEWAY);
+                    } else {
+                        ctx.close();
+                    }
+                    activeStreams.decrementAndGet();
+                    finishExchange(done, be, connectionPool, beChannel, this, false);
+                    if (ctx.pipeline().context("backpressure") != null) {
+                        ctx.pipeline().remove("backpressure");
+                    }
+                }
+            };
+
+            beChannel.pipeline().addLast("response", responseHandler);
+
+            var req = new DefaultHttpRequest(headers.protocolVersion(), method, uri, headers.headers());
+            req.headers().set(HttpHeaderNames.HOST, be.address().getHostName());
+            req.headers().set("X-Forwarded-For", clientIp);
+            beChannel.writeAndFlush(req);
+            if (initialContent.readableBytes() > 0) {
+                beChannel.writeAndFlush(new DefaultHttpContent(initialContent));
+            } else {
+                initialContent.release();
+            }
+
+            onBackendReady.accept(beChannel);
+        });
     }
 }

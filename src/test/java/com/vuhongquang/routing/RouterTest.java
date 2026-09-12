@@ -12,7 +12,7 @@ import static org.junit.jupiter.api.Assertions.*;
 class RouterTest {
 
     private BackendPool newPool() {
-        return new BackendPool(new CopyOnWriteArrayList<>(), new RoundRobinStrategy());
+        return new BackendPool(new CopyOnWriteArrayList<>(), new RoundRobinStrategy(), true);
     }
 
     @Test

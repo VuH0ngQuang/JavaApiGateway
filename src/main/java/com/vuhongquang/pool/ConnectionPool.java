@@ -9,6 +9,8 @@ import io.netty.channel.socket.SocketChannel;
 import io.netty.handler.codec.http.HttpClientCodec;
 import io.netty.util.concurrent.Future;
 import io.netty.util.concurrent.Promise;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.ArrayDeque;
 import java.util.Deque;
@@ -17,6 +19,8 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class ConnectionPool {
+    private static final Logger log = LoggerFactory.getLogger(ConnectionPool.class);
+
     private final Backend backend;
     private final EventLoopGroup group;
     private final EventLoop executor;
@@ -68,6 +72,7 @@ public class ConnectionPool {
                     promise.setSuccess(channel);
                     return ;
                 }
+                log.debug("Discarding dead idle connection to {}", backend.address());
                 totalConnections.decrementAndGet();
                 channel = idleChannels.pollFirst();
             }

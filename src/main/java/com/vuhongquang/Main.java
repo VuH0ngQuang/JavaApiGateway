@@ -90,7 +90,8 @@ public class Main {
                 registry,
                 serverChannelClass,
                 sslContext,
-                config
+                config,
+                router
         );
         worker.scheduleAtFixedRate(cache::logStats, 10, 10, TimeUnit.SECONDS);
         limiter.start();
