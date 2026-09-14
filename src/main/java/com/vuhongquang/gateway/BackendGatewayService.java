@@ -2,7 +2,9 @@ package com.vuhongquang.gateway;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import com.vuhongquang.discovery.DnsServiceDiscovery;
 import com.vuhongquang.gateway.request.AddBackendRequest;
+import com.vuhongquang.gateway.request.AddDiscoveryRequest;
 import com.vuhongquang.gateway.request.DeleteBackendRequest;
 import com.vuhongquang.gateway.request.PatchBackendRequest;
 import com.vuhongquang.health.HealthChecker;
@@ -16,6 +18,8 @@ import io.micrometer.prometheusmetrics.PrometheusMeterRegistry;
 import io.netty.buffer.ByteBufUtil;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.EventLoopGroup;
+import io.netty.channel.socket.DatagramChannel;
 import io.netty.handler.codec.http.*;
 
 import io.prometheus.metrics.expositionformats.PrometheusTextFormatWriter;
@@ -32,7 +36,9 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.NoSuchElementException;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 public class BackendGatewayService {
@@ -45,17 +51,24 @@ public class BackendGatewayService {
     private final HealthChecker healthChecker;
     private final PrometheusMeterRegistry registry;
     private final GatewayStateStore stateStore;
+    private final EventLoopGroup group;
+    private final Class<? extends DatagramChannel> datagramChannelClass;
+    private final Map<String, DnsServiceDiscovery> discoveries = new ConcurrentHashMap<>();
 
     public BackendGatewayService(Router router,
                                  ConnectionPoolManager poolManager,
                                  HealthChecker healthChecker,
                                  PrometheusMeterRegistry registry,
-                                 GatewayStateStore stateStore) {
+                                 GatewayStateStore stateStore,
+                                 EventLoopGroup group,
+                                 Class<? extends DatagramChannel> datagramChannelClass) {
         this.router = router;
         this.poolManager = poolManager;
         this.healthChecker = healthChecker;
         this.registry = registry;
         this.stateStore = stateStore;
+        this.group = group;
+        this.datagramChannelClass = datagramChannelClass;
     }
 
     public void handler(ChannelHandlerContext ctx, FullHttpRequest req) {
@@ -141,33 +154,16 @@ public class BackendGatewayService {
 
     private void deleteBackend (ChannelHandlerContext ctx, FullHttpRequest req) {
         String id = req.uri().substring("/gateway/backends/".length());
-        String route = "";
         try {
             DeleteBackendRequest beReq = validateJson(ByteBufUtil.getBytes(req.content()), DeleteBackendRequest.class);
             if (beReq == null) {
                 sendError(ctx, req, HttpResponseStatus.BAD_REQUEST);
                 return;
             }
-            route = beReq.route();
-            BackendPool backendPool = router.getExact(beReq.route());
-            if (backendPool == null) {
-                sendError(ctx, req, HttpResponseStatus.NOT_FOUND);
-                return;
-            }
-            Optional<Backend> beOpt = backendPool.findByAddress(id);
-            if (beOpt.isEmpty()) {
-                sendError(ctx, req, HttpResponseStatus.NOT_FOUND);
-                return;
-            }
-            Backend be = beOpt.get();
-            backendPool.removeBackend(be);
-            poolManager.deleteBackend(be);
-            healthChecker.deleteBackend(be);
-            persistState();
-            log.info("Backend {} removed from route {}", id, route);
+            removeBackend(beReq, id);
             sendSuccess(ctx, req);
         } catch (Exception e) {
-            log.error("error while delete backend to route {}: {}", route, e.toString());
+            log.error("error while delete backend for id {}: {}", id, e.toString());
             sendError(ctx, req, HttpResponseStatus.INTERNAL_SERVER_ERROR);
         }
     }
@@ -222,11 +218,27 @@ public class BackendGatewayService {
         ctx.writeAndFlush(res);
     }
 
-    // Thêm hàm persistState() — duyệt router.routes() → mỗi pool → mỗi backend,
-    // dựng lại List<AddBackendRequest>,
-    // gọi stateStore.save(...).
-    // Gọi hàm này ở cuối cả 3 handler addBackend, patchBackend, deleteBackend (ngay trước sendSuccess),
-    // vì cả 3 đều làm thay đổi state cần lưu lại.
+    public void addDiscovery(ChannelHandlerContext ctx, FullHttpRequest req) {
+        String route = "";
+        try {
+            AddDiscoveryRequest config = validateJson(ByteBufUtil.getBytes(req.content()), AddDiscoveryRequest.class);
+            if (config == null) {
+                sendError(ctx, req, HttpResponseStatus.BAD_REQUEST);
+                return;
+            }
+            route = config.route();
+            DnsServiceDiscovery discovery = new DnsServiceDiscovery(config, router, this, group, datagramChannelClass);
+            discovery.start();
+            discoveries.put(route, discovery);
+            log.info("Started DNS discovery for route {} -> {}", route, config.hostname());
+            sendSuccess(ctx, req);
+        } catch (Exception e) {
+            log.error("error while add new DNS discovery for route {}: {}", route,e.toString());
+            sendError(ctx, req, HttpResponseStatus.INTERNAL_SERVER_ERROR);
+        }
+    }
+
+    //save the current snapshot of the gateway
     private void persistState() {
         try {
             ArrayList<AddBackendRequest> copyBackends = new ArrayList<>();
@@ -260,7 +272,7 @@ public class BackendGatewayService {
         }
     }
 
-    private void registerBackend(AddBackendRequest beReq) {
+    public void registerBackend(AddBackendRequest beReq) {
         if (beReq == null) {
             throw new IllegalArgumentException("registerBackend called with a null request");
         }
@@ -283,6 +295,27 @@ public class BackendGatewayService {
                 registry
         );
         addToPool(backendPool, be);
+    }
+
+    public void removeBackend (DeleteBackendRequest beReq, String id) {
+        if (beReq == null) {
+            throw new IllegalArgumentException("removeBackend called with a null request");
+        }
+        var route = beReq.route();
+        BackendPool backendPool = router.getExact(route);
+        if (backendPool == null) {
+            throw new NoSuchElementException("route not found: " + route);
+        }
+        Optional<Backend> beOpt = backendPool.findByAddress(id);
+        if (beOpt.isEmpty()) {
+            throw new NoSuchElementException("backend not found: " + id + " on route " + route);
+        }
+        Backend be = beOpt.get();
+        backendPool.removeBackend(be);
+        poolManager.deleteBackend(be);
+        healthChecker.deleteBackend(be);
+        persistState();
+        log.info("Backend {} removed from route {}", id, route);
     }
 
     private <T> T validateJson(byte[] json, Class<T> tClass) {

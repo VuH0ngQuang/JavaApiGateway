@@ -24,6 +24,9 @@ public class GatewayHandler extends SimpleChannelInboundHandler<FullHttpRequest>
             if (path.startsWith("backend")) {
                 gatewayService.handler(ctx, msg);
                 return;
+            } else if (path.startsWith("discovery")) {
+                gatewayService.addDiscovery(ctx, msg);
+                return;
             } else if (path.startsWith("metrics")) {
                 gatewayService.getMetrics(ctx, msg);
                 return;

@@ -330,7 +330,8 @@ public class RequestForwarder {
                                  ByteBuf initialContent,
                                  String clientIp,
                                  BackendPool pool,
-                                 Consumer<Channel> onBackendReady
+                                 Consumer<Channel> onBackendReady,
+                                 boolean isLastContent
     ) {
         final HttpMethod method = headers.method();
         final String uri = headers.uri();
@@ -437,7 +438,9 @@ public class RequestForwarder {
             req.headers().set(HttpHeaderNames.HOST, be.address().getHostName());
             req.headers().set("X-Forwarded-For", clientIp);
             beChannel.writeAndFlush(req);
-            if (initialContent.readableBytes() > 0) {
+            if (isLastContent) {
+                beChannel.writeAndFlush(new DefaultLastHttpContent(initialContent));
+            } else if (initialContent.readableBytes() > 0) {
                 beChannel.writeAndFlush(new DefaultHttpContent(initialContent));
             } else {
                 initialContent.release();

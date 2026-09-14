@@ -16,13 +16,12 @@ import io.micrometer.prometheusmetrics.PrometheusMeterRegistry;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.IoHandlerFactory;
 import io.netty.channel.MultiThreadIoEventLoopGroup;
-import io.netty.channel.epoll.Epoll;
-import io.netty.channel.epoll.EpollIoHandler;
-import io.netty.channel.epoll.EpollServerSocketChannel;
-import io.netty.channel.epoll.EpollSocketChannel;
+import io.netty.channel.epoll.*;
 import io.netty.channel.nio.NioIoHandler;
+import io.netty.channel.socket.DatagramChannel;
 import io.netty.channel.socket.ServerSocketChannel;
 import io.netty.channel.socket.SocketChannel;
+import io.netty.channel.socket.nio.NioDatagramChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
 import io.netty.handler.ssl.ApplicationProtocolConfig;
@@ -45,6 +44,7 @@ public class Main {
         IoHandlerFactory ioHandlerFactory = useEpoll ? EpollIoHandler.newFactory() : NioIoHandler.newFactory();
         Class<? extends ServerSocketChannel> serverChannelClass = useEpoll ? EpollServerSocketChannel.class : NioServerSocketChannel.class;
         Class<? extends SocketChannel> clientChannelClass = useEpoll ? EpollSocketChannel.class : NioSocketChannel.class;
+        Class<? extends DatagramChannel> datagramChannelClass = useEpoll ? EpollDatagramChannel.class : NioDatagramChannel.class;
 
         final GatewayConfig config = GatewayConfig.defaults();
         final EventLoopGroup boss = new MultiThreadIoEventLoopGroup(2, ioHandlerFactory);
@@ -53,10 +53,25 @@ public class Main {
         final PrometheusMeterRegistry registry = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
         final HealthChecker healthChecker = new HealthChecker(new CopyOnWriteArrayList<>(), worker, clientChannelClass);
         final Router router = new Router(new ConcurrentHashMap<>());
-        final ConnectionPoolManager manager = new ConnectionPoolManager(List.of(), worker, config.maxConnections(), config.acquireTimeoutMs(), registry, clientChannelClass);
+        final ConnectionPoolManager manager = new ConnectionPoolManager(
+                List.of(),
+                worker,
+                config.maxConnections(),
+                config.acquireTimeoutMs(),
+                registry,
+                clientChannelClass
+        );
         final RequestForwarder forwarder = new RequestForwarder(router, manager, cache, registry);
         final GatewayStateStore stateStore = new GatewayStateStore(config.stateDir(),config.stateRetentionCount());
-        final BackendGatewayService gatewayService = new BackendGatewayService(router, manager, healthChecker, registry, stateStore);
+        final BackendGatewayService gatewayService = new BackendGatewayService(
+                router,
+                manager,
+                healthChecker,
+                registry,
+                stateStore,
+                worker,
+                datagramChannelClass
+        );
         final TokenBucketLimiter limiter = new TokenBucketLimiter(
                 config.rateLimitCapacity(),
                 config.rateLimitWindowMs(),

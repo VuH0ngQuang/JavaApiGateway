@@ -47,6 +47,7 @@ target.md
 
 /bench-kit/
 /benchmarks/dummy_backend
+/benchmarks/fake_dns
 /dependency-reduced-pom.xml
 /INTERVIEW_NOTES.md
 /snapshot/

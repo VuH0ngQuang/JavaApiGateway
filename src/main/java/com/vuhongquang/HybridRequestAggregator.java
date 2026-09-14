@@ -14,6 +14,8 @@ import io.netty.handler.codec.http.LastHttpContent;
 
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
+import java.util.ArrayDeque;
+import java.util.Deque;
 
 public class HybridRequestAggregator extends ChannelInboundHandlerAdapter {
     private final Router router;
@@ -26,6 +28,7 @@ public class HybridRequestAggregator extends ChannelInboundHandlerAdapter {
     private boolean streaming = false;
     private Channel ch;
     private String clientIp;
+    private final Deque<HttpContent> pending = new ArrayDeque<>();
 
     public HybridRequestAggregator(Router router, RequestForwarder forwarder, GatewayConfig config) {
         this.router = router;
@@ -52,13 +55,14 @@ public class HybridRequestAggregator extends ChannelInboundHandlerAdapter {
             if (pool != null && pool.isForceStream()) {
                 streaming = true;
                 ctx.channel().config().setAutoRead(false);
-                forwarder.forwardStreaming(ctx, req, ctx.alloc().buffer(0), clientIp, pool, beCh -> {
-                    ch = beCh;
-                    ctx.channel().config().setAutoRead(true);
-                    if (beCh == null) {
-                        resetState();
-                    }
-                });
+                forwarder.forwardStreaming(
+                        ctx,
+                        req,
+                        ctx.alloc().buffer(0),
+                        clientIp,
+                        pool,
+                        beCh -> onStreamingBackendReady(ctx, beCh),
+                        false);
                 return;
             }
             crtReq = req;
@@ -72,24 +76,23 @@ public class HybridRequestAggregator extends ChannelInboundHandlerAdapter {
                 if (ch != null) {
                     ch.writeAndFlush(content);
                     if (content instanceof LastHttpContent) resetState();
-                    return;
+                } else {
+                    pending.addLast(content);
                 }
+                return;
             }
 
             int newSize = accumulator.readableBytes() + content.content().readableBytes();
             if (pool != null && newSize > config.maxContentLength()) {
+                boolean isLast = content instanceof LastHttpContent;
                 accumulator.writeBytes(content.content());
                 content.release();
                 streaming = true;
                 ctx.channel().config().setAutoRead(false);
-                forwarder.forwardStreaming(ctx, crtReq, accumulator, clientIp, pool, beCh -> {
-                    ch = beCh;
-                    ctx.channel().config().setAutoRead(true);
-                    if (beCh == null) {
-                        resetState();
-                    }
-                });
+                ByteBuf initialContent = accumulator;
                 accumulator = null;
+                forwarder.forwardStreaming(ctx, crtReq, initialContent, clientIp, pool,
+                        beCh -> onStreamingBackendReady(ctx, beCh), isLast);
                 return;
             }
 
@@ -111,6 +114,23 @@ public class HybridRequestAggregator extends ChannelInboundHandlerAdapter {
         }
     }
 
+    private void onStreamingBackendReady(ChannelHandlerContext ctx, Channel beCh) {
+        ctx.channel().config().setAutoRead(true);
+        if (beCh == null) {
+            resetState();
+            return;
+        }
+        ch = beCh;
+        HttpContent queued;
+        while ((queued = pending.pollFirst()) != null) {
+            ch.writeAndFlush(queued);
+            if (queued instanceof LastHttpContent) {
+                resetState();
+                return;
+            }
+        }
+    }
+
     private void resetState() {
         pool = null;
         streaming = false;
@@ -120,5 +140,9 @@ public class HybridRequestAggregator extends ChannelInboundHandlerAdapter {
             accumulator.release();
         }
         accumulator = null;
+        HttpContent leftover;
+        while ((leftover = pending.pollFirst()) != null) {
+            leftover.release();
+        }
     }
 }
