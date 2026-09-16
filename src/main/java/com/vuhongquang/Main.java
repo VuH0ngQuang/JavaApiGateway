@@ -2,9 +2,10 @@ package com.vuhongquang;
 
 import com.vuhongquang.cache.LruResponseCache;
 import com.vuhongquang.cache.ResponseCache;
-import com.vuhongquang.gateway.BackendGatewayService;
+import com.vuhongquang.gateway.*;
 import com.vuhongquang.forwarding.RequestForwarder;
-import com.vuhongquang.gateway.GatewayStateStore;
+import com.vuhongquang.gateway.request.AddBackendRequest;
+import com.vuhongquang.gateway.request.AddDiscoveryRequest;
 import com.vuhongquang.health.HealthChecker;
 import com.vuhongquang.pool.ConnectionPoolManager;
 import com.vuhongquang.ratelimit.tokenbucket.TokenBucketLimiter;
@@ -62,15 +63,28 @@ public class Main {
                 clientChannelClass
         );
         final RequestForwarder forwarder = new RequestForwarder(router, manager, cache, registry);
-        final GatewayStateStore stateStore = new GatewayStateStore(config.stateDir(),config.stateRetentionCount());
+        final GatewayStateStore<AddBackendRequest> beStateStore = new GatewayStateStore<>(
+                config.stateDir(),
+                config.stateRetentionCount(),
+                config.backendStatePrefix(),
+                AddBackendRequest.class
+        );
+        final GatewayStateStore<AddDiscoveryRequest> discoveryStateStore = new GatewayStateStore<>(
+                config.stateDir(),
+                config.stateRetentionCount(),
+                config.discoveryStatePrefix(),
+                AddDiscoveryRequest.class
+        );
+        final BackendRegistry beRegistry = new BackendRegistry(router, manager, healthChecker, registry);
+        final DiscoveryRegistry discoveryRegistry = new DiscoveryRegistry(router, worker, datagramChannelClass, beRegistry);
+        final BackendStatePersister beStatePersister = new BackendStatePersister(router, beStateStore, beRegistry, config,registry);
+        final DiscoveryStatePersister discoveryStatePersister = new DiscoveryStatePersister(discoveryRegistry, discoveryStateStore, config, registry);
         final BackendGatewayService gatewayService = new BackendGatewayService(
-                router,
-                manager,
-                healthChecker,
                 registry,
-                stateStore,
-                worker,
-                datagramChannelClass
+                beRegistry,
+                discoveryRegistry,
+                beStatePersister,
+                discoveryStatePersister
         );
         final TokenBucketLimiter limiter = new TokenBucketLimiter(
                 config.rateLimitCapacity(),
@@ -111,7 +125,8 @@ public class Main {
         worker.scheduleAtFixedRate(cache::logStats, 10, 10, TimeUnit.SECONDS);
         limiter.start();
         healthChecker.start();
-        gatewayService.restoreBackend();
+        beStatePersister.restore();
+        discoveryStatePersister.restore();
 
         try {
             server.start();

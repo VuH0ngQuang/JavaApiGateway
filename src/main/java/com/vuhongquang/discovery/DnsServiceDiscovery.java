@@ -1,6 +1,6 @@
 package com.vuhongquang.discovery;
 
-import com.vuhongquang.gateway.BackendGatewayService;
+import com.vuhongquang.gateway.BackendRegistry;
 import com.vuhongquang.gateway.request.AddBackendRequest;
 import com.vuhongquang.gateway.request.AddDiscoveryRequest;
 import com.vuhongquang.gateway.request.DeleteBackendRequest;
@@ -26,26 +26,26 @@ public class DnsServiceDiscovery {
 
     private final AddDiscoveryRequest config;
     private final Router router;
-    private final BackendGatewayService service;
     private final DnsNameResolver resolver;
     private final EventLoopGroup group;
+    private final BackendRegistry beRegistry;
 
     private ScheduledFuture<?> scheduledTask;
 
     public DnsServiceDiscovery(
             AddDiscoveryRequest config,
             Router router,
-            BackendGatewayService service,
             EventLoopGroup group,
-            Class<? extends DatagramChannel> datagramChannelClass
+            Class<? extends DatagramChannel> datagramChannelClass,
+            BackendRegistry beRegistry
     ) {
         this.config = config;
         this.router = router;
-        this.service = service;
         this.resolver = new DnsNameResolverBuilder(group.next())
                 .datagramChannelType(datagramChannelClass)
                 .build();
         this.group = group;
+        this.beRegistry = beRegistry;
     }
 
     public void start() {
@@ -73,7 +73,7 @@ public class DnsServiceDiscovery {
                             config.strategy(),
                             config.forceStream()
                     );
-                    service.registerBackend(beReq);
+                    beRegistry.registerBackend(beReq);
                     log.info("Discovery added backend {}:{} to new route {}", address.getHostAddress(), config.port(), config.route());
                 }
                 return;
@@ -86,7 +86,7 @@ public class DnsServiceDiscovery {
                 } else {
                     DeleteBackendRequest beReq = new DeleteBackendRequest(config.route());
                     String id = address.getHostAddress() + ":" + config.port();
-                    service.removeBackend(beReq, id);
+                    beRegistry.removeBackend(beReq, id);
                     log.info("Discovery removed backend {} from route {} (no longer in DNS)", id, config.route());
                 }
             }
@@ -102,9 +102,11 @@ public class DnsServiceDiscovery {
                         config.strategy(),
                         config.forceStream()
                 );
-                service.registerBackend(beReq);
+                beRegistry.registerBackend(beReq);
                 log.info("Discovery added backend {}:{} to route {}", address.getHostAddress(), config.port(), config.route());
             }
         });
     }
+
+    public AddDiscoveryRequest getConfig() {return config;}
 }

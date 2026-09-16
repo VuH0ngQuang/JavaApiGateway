@@ -13,7 +13,10 @@ public record GatewayConfig(
         int stateRetentionCount,
         String tlsCertPath,
         String tlsKeyPath,
-        int maxContentLength
+        int maxContentLength,
+        int maxRetryPersister,
+        String backendStatePrefix,
+        String discoveryStatePrefix
 ) {
     public static GatewayConfig defaults() {
         return new GatewayConfig(
@@ -29,7 +32,10 @@ public record GatewayConfig(
                 20,
                 "",
                 "",
-                64 * 1024 * 1024
+                64 * 1024 * 1024,
+                3,
+                "gateway-backends",
+                "gateway-discovery"
         );
     }
 }

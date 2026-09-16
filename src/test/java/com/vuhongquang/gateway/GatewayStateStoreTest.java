@@ -16,7 +16,7 @@ class GatewayStateStoreTest {
     @Test
     void save_thenLoad_returnsSameSnapshot(@TempDir Path tempDir) throws IOException {
 
-        GatewayStateStore store = new GatewayStateStore(tempDir.toString(), 20);
+        GatewayStateStore<AddBackendRequest> store = new GatewayStateStore<>(tempDir.toString(), 20, "gateway-state", AddBackendRequest.class);
 
         List<AddBackendRequest> snapshot = List.of(
                 new AddBackendRequest("/api/movies",
@@ -39,14 +39,14 @@ class GatewayStateStoreTest {
 
     @Test
     void load_returnsEmptyListWhenNoFilesExist(@TempDir Path tempDir) throws IOException {
-        GatewayStateStore store = new GatewayStateStore(tempDir.toString(), 20);
+        GatewayStateStore<AddBackendRequest> store = new GatewayStateStore<>(tempDir.toString(), 20, "gateway-state", AddBackendRequest.class);
         List<AddBackendRequest> loaded = store.load();
         assertTrue(loaded.isEmpty());
     }
 
     @Test
     void save_prunesOldestFilesBeyondRetentionCount(@TempDir Path tempDir) throws IOException, InterruptedException {
-        GatewayStateStore store = new GatewayStateStore(tempDir.toString(), 2);
+        GatewayStateStore<AddBackendRequest> store = new GatewayStateStore<>(tempDir.toString(), 2, "gateway-state", AddBackendRequest.class);
         store.save(List.of());
         Thread.sleep(5);
         store.save(List.of());

@@ -8,7 +8,6 @@ import io.micrometer.prometheusmetrics.PrometheusMeterRegistry;
 
 import io.netty.channel.*;
 import io.netty.handler.codec.http.*;
-import io.netty.util.concurrent.Future;
 
 import io.micrometer.core.instrument.Timer;
 
@@ -23,14 +22,12 @@ public class BackendResponseHandler extends SimpleChannelInboundHandler<FullHttp
     private static final int RETRY_AFTER_SECONDS = 60;
 
     private final RequestForwarder forwarder;
-    private final PrometheusMeterRegistry registry;
     private final Counter requestCounter;
 
     public BackendResponseHandler(
             RequestForwarder forwarder,
             PrometheusMeterRegistry registry) {
         this.forwarder = forwarder;
-        this.registry = registry;
         this.requestCounter = registry.counter("gateway_requests");
     }
 
@@ -38,7 +35,6 @@ public class BackendResponseHandler extends SimpleChannelInboundHandler<FullHttp
     protected void channelRead0(ChannelHandlerContext ctx, FullHttpRequest msg) throws Exception {
         String clientIp = ((InetSocketAddress) ctx.channel().remoteAddress()).getAddress().getHostAddress();
         log.info("-> {} {} from {}", msg.method(), msg.uri(), clientIp);
-        final HttpVersion clientVersion = msg.protocolVersion();
 
         requestCounter.increment();
         Timer.Sample time = ctx.channel().attr(RateLimitHandler.getTimerKey()).get();

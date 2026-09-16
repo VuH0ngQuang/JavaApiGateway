@@ -2,24 +2,17 @@ package com.vuhongquang.gateway;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 
-import com.vuhongquang.discovery.DnsServiceDiscovery;
 import com.vuhongquang.gateway.request.AddBackendRequest;
 import com.vuhongquang.gateway.request.AddDiscoveryRequest;
 import com.vuhongquang.gateway.request.DeleteBackendRequest;
 import com.vuhongquang.gateway.request.PatchBackendRequest;
-import com.vuhongquang.health.HealthChecker;
 import com.vuhongquang.loadbalancer.*;
-import com.vuhongquang.pool.ConnectionPoolManager;
-import com.vuhongquang.resilience.CircuitBreaker;
-import com.vuhongquang.routing.Router;
 
 import io.micrometer.prometheusmetrics.PrometheusMeterRegistry;
 
 import io.netty.buffer.ByteBufUtil;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelHandlerContext;
-import io.netty.channel.EventLoopGroup;
-import io.netty.channel.socket.DatagramChannel;
 import io.netty.handler.codec.http.*;
 
 import io.prometheus.metrics.expositionformats.PrometheusTextFormatWriter;
@@ -29,46 +22,31 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 
-import java.net.InetSocketAddress;
 
 import java.nio.charset.StandardCharsets;
-
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
-import java.util.NoSuchElementException;
-import java.util.Optional;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CopyOnWriteArrayList;
 
 public class BackendGatewayService {
 
     private static final Logger log = LoggerFactory.getLogger(BackendGatewayService.class);
     private static final ObjectMapper mapper = new ObjectMapper();
 
-    private final Router router;
-    private final ConnectionPoolManager poolManager;
-    private final HealthChecker healthChecker;
     private final PrometheusMeterRegistry registry;
-    private final GatewayStateStore stateStore;
-    private final EventLoopGroup group;
-    private final Class<? extends DatagramChannel> datagramChannelClass;
-    private final Map<String, DnsServiceDiscovery> discoveries = new ConcurrentHashMap<>();
+    private final BackendRegistry beRegistry;
+    private final DiscoveryRegistry discoveryRegistry;
+    private final BackendStatePersister beStatePersister;
+    private final DiscoveryStatePersister discoveryStatePersister;
 
-    public BackendGatewayService(Router router,
-                                 ConnectionPoolManager poolManager,
-                                 HealthChecker healthChecker,
-                                 PrometheusMeterRegistry registry,
-                                 GatewayStateStore stateStore,
-                                 EventLoopGroup group,
-                                 Class<? extends DatagramChannel> datagramChannelClass) {
-        this.router = router;
-        this.poolManager = poolManager;
-        this.healthChecker = healthChecker;
+    public BackendGatewayService(PrometheusMeterRegistry registry,
+                                 BackendRegistry beRegistry,
+                                 DiscoveryRegistry discoveryRegistry,
+                                 BackendStatePersister beStatePersister,
+                                 DiscoveryStatePersister discoveryStatePersister
+    ) {
         this.registry = registry;
-        this.stateStore = stateStore;
-        this.group = group;
-        this.datagramChannelClass = datagramChannelClass;
+        this.beRegistry = beRegistry;
+        this.discoveryRegistry = discoveryRegistry;
+        this.beStatePersister = beStatePersister;
+        this.discoveryStatePersister = discoveryStatePersister;
     }
 
     public void handler(ChannelHandlerContext ctx, FullHttpRequest req) {
@@ -99,52 +77,8 @@ public class BackendGatewayService {
                 return;
             }
             route = beReq.route();
-            BackendPool backendPool = router.getExact(beReq.route());
-            if (backendPool == null) {
-                sendError(ctx, req, HttpResponseStatus.NOT_FOUND);
-                return;
-            }
-            Optional<Backend> beOpt = backendPool.findByAddress(id);
-            if (beOpt.isEmpty()) {
-                sendError(ctx, req, HttpResponseStatus.NOT_FOUND);
-                return;
-            }
-            Backend be = beOpt.get();
-            CircuitBreaker oldBreaker = be.getBreaker();
-            if (beReq.minimumCalls() != null ||
-                beReq.windowSize() != null ||
-                beReq.openDurationMs() != null ||
-                beReq.failureRateThreshold() != null
-            ) {
-                int minimumCalls;
-                int windowSize;
-                long openDurationMs;
-                Double failureRateThreshold;
-                if (beReq.minimumCalls() != null) {
-                    minimumCalls = beReq.minimumCalls();
-                } else {
-                    minimumCalls = oldBreaker.minimumCalls();
-                }
-                if (beReq.windowSize() != null) {
-                    windowSize = beReq.windowSize();
-                } else {
-                    windowSize = oldBreaker.windowSize();
-                }
-                if (beReq.openDurationMs() != null) {
-                    openDurationMs = beReq.openDurationMs();
-                } else {
-                    openDurationMs = oldBreaker.openDurationMs();
-                }
-                if (beReq.failureRateThreshold() != null) {
-                    failureRateThreshold = beReq.failureRateThreshold();
-                } else {
-                    failureRateThreshold = oldBreaker.failureRateThreshold();
-                }
-                CircuitBreaker newBreaker = new CircuitBreaker(openDurationMs, failureRateThreshold, minimumCalls, windowSize);
-                be.setBreaker(newBreaker);
-                log.info("Backend {} on route {} reconfigured (breaker in-flight state reset)", id, route);
-            }
-            persistState();
+            beRegistry.patchBackend(id, beReq);
+            beStatePersister.save();
             sendSuccess(ctx, req);
         } catch (Exception e) {
             log.error("error while patch backend to route {}: {}", route, e.toString());
@@ -160,7 +94,8 @@ public class BackendGatewayService {
                 sendError(ctx, req, HttpResponseStatus.BAD_REQUEST);
                 return;
             }
-            removeBackend(beReq, id);
+            beRegistry.removeBackend(beReq, id);
+            beStatePersister.save();
             sendSuccess(ctx, req);
         } catch (Exception e) {
             log.error("error while delete backend for id {}: {}", id, e.toString());
@@ -178,32 +113,14 @@ public class BackendGatewayService {
                 return;
             }
             route = beReq.route();
-            registerBackend(beReq);
-            persistState();
+            beRegistry.registerBackend(beReq);
+            beStatePersister.save();
             log.info("Backend {}:{} added to route {}", beReq.host(), beReq.port(), route);
             sendSuccess(ctx, req);
         } catch (Exception e) {
             log.error("error while add new backend to route {}: {}", route,e.toString());
             sendError(ctx, req, HttpResponseStatus.INTERNAL_SERVER_ERROR);
         }
-    }
-
-    public void restoreBackend() {
-        List<AddBackendRequest> snapshot;
-        try {
-            snapshot = stateStore.load();
-        } catch (IOException e) {
-            log.error("Failed to load gateway state, starting with no backends: {}", e.toString());
-            return;
-        }
-        for (AddBackendRequest beReq : snapshot) {
-            try {
-                registerBackend(beReq);
-            } catch (Exception e) {
-                log.error("Failed to restore backend for route {}: {}", beReq.route(), e.toString());
-            }
-        }
-        log.info("Restored {} backend(s) from snapshot", snapshot.size());
     }
 
     public void getMetrics (ChannelHandlerContext ctx, FullHttpRequest req) {
@@ -221,101 +138,17 @@ public class BackendGatewayService {
     public void addDiscovery(ChannelHandlerContext ctx, FullHttpRequest req) {
         String route = "";
         try {
-            AddDiscoveryRequest config = validateJson(ByteBufUtil.getBytes(req.content()), AddDiscoveryRequest.class);
-            if (config == null) {
-                sendError(ctx, req, HttpResponseStatus.BAD_REQUEST);
-                return;
+            AddDiscoveryRequest discoveryReq = validateJson(ByteBufUtil.getBytes(req.content()), AddDiscoveryRequest.class);
+            if (discoveryReq != null) {
+                route = discoveryReq.route();
             }
-            route = config.route();
-            DnsServiceDiscovery discovery = new DnsServiceDiscovery(config, router, this, group, datagramChannelClass);
-            discovery.start();
-            discoveries.put(route, discovery);
-            log.info("Started DNS discovery for route {} -> {}", route, config.hostname());
+            discoveryRegistry.startDiscovery(discoveryReq);
+            discoveryStatePersister.save();
             sendSuccess(ctx, req);
         } catch (Exception e) {
             log.error("error while add new DNS discovery for route {}: {}", route,e.toString());
             sendError(ctx, req, HttpResponseStatus.INTERNAL_SERVER_ERROR);
         }
-    }
-
-    //save the current snapshot of the gateway
-    private void persistState() {
-        try {
-            ArrayList<AddBackendRequest> copyBackends = new ArrayList<>();
-            for (Map.Entry<String, BackendPool> poolEntry : router.routes().entrySet()) {
-                String route = poolEntry.getKey();
-                BackendPool pool = poolEntry.getValue();
-                List<Backend> backends = pool.backends();
-                for (Backend be : backends) {
-                    CircuitBreaker breaker = be.getBreaker();
-                    LoadBalancingStrategy strategy = pool.strategy();
-                    Optional<StrategyType> strategyId = StrategyType.fromStrategy(strategy);
-                    if (strategyId.isEmpty()) {
-                        throw new IllegalStateException("Route " + route + " uses a LoadBalancingStrategy not registered in StrategyType: " + strategy.getClass());
-                    }
-                    AddBackendRequest request = new AddBackendRequest(route,
-                            be.address().getHostName(),
-                            be.address().getPort(),
-                            breaker.openDurationMs(),
-                            breaker.failureRateThreshold(),
-                            breaker.minimumCalls(),
-                            breaker.windowSize(),
-                            strategyId.get().getId(),
-                            pool.isForceStream()
-                    );
-                    copyBackends.add(request);
-                }
-            }
-            stateStore.save(copyBackends);
-        } catch (Exception e) {
-            log.error("Failed to persist gateway state: {}", e.toString());
-        }
-    }
-
-    public void registerBackend(AddBackendRequest beReq) {
-        if (beReq == null) {
-            throw new IllegalArgumentException("registerBackend called with a null request");
-        }
-        String route = beReq.route();
-        BackendPool backendPool = router.getExact(route);
-        if (backendPool == null) {
-            Optional<StrategyType> strategy = StrategyType.fromId(beReq.strategy());
-            if (strategy.isEmpty()) {
-                throw new IllegalArgumentException("unknown strategy id: " + beReq.strategy());
-            }
-            backendPool = createNewPool(route, strategy.get().create(), beReq.forceStream());
-        }
-        Backend be = new Backend(
-                new InetSocketAddress(beReq.host(), beReq.port()),
-                new CircuitBreaker(beReq.openDurationMs(),
-                        beReq.failureRateThreshold(),
-                        beReq.minimumCalls(),
-                        beReq.windowSize()
-                ),
-                registry
-        );
-        addToPool(backendPool, be);
-    }
-
-    public void removeBackend (DeleteBackendRequest beReq, String id) {
-        if (beReq == null) {
-            throw new IllegalArgumentException("removeBackend called with a null request");
-        }
-        var route = beReq.route();
-        BackendPool backendPool = router.getExact(route);
-        if (backendPool == null) {
-            throw new NoSuchElementException("route not found: " + route);
-        }
-        Optional<Backend> beOpt = backendPool.findByAddress(id);
-        if (beOpt.isEmpty()) {
-            throw new NoSuchElementException("backend not found: " + id + " on route " + route);
-        }
-        Backend be = beOpt.get();
-        backendPool.removeBackend(be);
-        poolManager.deleteBackend(be);
-        healthChecker.deleteBackend(be);
-        persistState();
-        log.info("Backend {} removed from route {}", id, route);
     }
 
     private <T> T validateJson(byte[] json, Class<T> tClass) {
@@ -344,17 +177,5 @@ public class BackendGatewayService {
         var res = new DefaultFullHttpResponse(msg.protocolVersion(), HttpResponseStatus.OK);
         res.headers().set(HttpHeaderNames.CONTENT_LENGTH, 0);
         ctx.writeAndFlush(res);
-    }
-
-    private BackendPool createNewPool(String route, LoadBalancingStrategy loadBalancingStrategy, boolean forceStream) {
-        BackendPool pool = new BackendPool(new CopyOnWriteArrayList<>(), loadBalancingStrategy, forceStream);
-        router.register(route, pool);
-        return pool;
-    }
-
-    private void addToPool(BackendPool pool, Backend be) {
-        poolManager.addBackend(be);
-        healthChecker.addBackend(be);
-        pool.addBackend(be);
     }
 }
