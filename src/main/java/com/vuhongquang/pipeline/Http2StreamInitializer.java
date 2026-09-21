@@ -1,5 +1,6 @@
-package com.vuhongquang;
+package com.vuhongquang.pipeline;
 
+import com.vuhongquang.GatewayConfig;
 import com.vuhongquang.forwarding.RequestForwarder;
 import com.vuhongquang.gateway.BackendGatewayService;
 import com.vuhongquang.gateway.GatewayHandler;

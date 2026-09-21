@@ -1,7 +1,6 @@
 package com.vuhongquang;
 
-import com.vuhongquang.cache.LruResponseCache;
-import com.vuhongquang.cache.ResponseCache;
+import com.vuhongquang.cache.StripedResponseCache;
 import com.vuhongquang.gateway.*;
 import com.vuhongquang.forwarding.RequestForwarder;
 import com.vuhongquang.gateway.request.AddBackendRequest;
@@ -50,7 +49,7 @@ public class Main {
         final GatewayConfig config = GatewayConfig.defaults();
         final EventLoopGroup boss = new MultiThreadIoEventLoopGroup(2, ioHandlerFactory);
         final EventLoopGroup worker = new MultiThreadIoEventLoopGroup(ioHandlerFactory);
-        final ResponseCache cache = new LruResponseCache(config.cacheMaxBytes(), config.cacheMaxEntries());
+        final StripedResponseCache cache = new StripedResponseCache(config.cacheMaxBytes(), config.cacheMaxEntries());
         final PrometheusMeterRegistry registry = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
         final HealthChecker healthChecker = new HealthChecker(new CopyOnWriteArrayList<>(), worker, clientChannelClass);
         final Router router = new Router(new ConcurrentHashMap<>());
@@ -122,7 +121,9 @@ public class Main {
                 config,
                 router
         );
-        worker.scheduleAtFixedRate(cache::logStats, 10, 10, TimeUnit.SECONDS);
+        if (config.cacheMaxBytes() != 0) {
+            worker.scheduleAtFixedRate(cache::logStats, 10, 10, TimeUnit.SECONDS);
+        }
         limiter.start();
         healthChecker.start();
         beStatePersister.restore();

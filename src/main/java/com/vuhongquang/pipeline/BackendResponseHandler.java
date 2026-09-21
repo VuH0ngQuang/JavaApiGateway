@@ -1,4 +1,4 @@
-package com.vuhongquang;
+package com.vuhongquang.pipeline;
 
 import com.vuhongquang.forwarding.RequestForwarder;
 

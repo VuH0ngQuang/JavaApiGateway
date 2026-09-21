@@ -6,7 +6,7 @@ import io.netty.handler.codec.http.HttpResponseStatus;
 
 public interface ResponseCache {
     CachedResponse get(String uri);
-    void put(String uri, HttpResponseStatus status, byte[] body, HttpHeaders headers);
+    CachedResponse put(String uri, HttpResponseStatus status, byte[] body, HttpHeaders headers);
     void clear();
     long hits();
     long misses();
