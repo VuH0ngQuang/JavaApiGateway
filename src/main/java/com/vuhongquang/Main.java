@@ -1,8 +1,12 @@
 package com.vuhongquang;
 
+import com.vuhongquang.cache.CachedResponse;
 import com.vuhongquang.cache.StripedResponseCache;
-import com.vuhongquang.gateway.*;
+import com.vuhongquang.cache.striped.EvictionStore;
+import com.vuhongquang.cache.striped.LfuStore;
+import com.vuhongquang.cache.striped.LruStore;
 import com.vuhongquang.forwarding.RequestForwarder;
+import com.vuhongquang.gateway.*;
 import com.vuhongquang.gateway.request.AddBackendRequest;
 import com.vuhongquang.gateway.request.AddDiscoveryRequest;
 import com.vuhongquang.health.HealthChecker;
@@ -35,6 +39,7 @@ import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 
 public class Main {
     public static void main(String[] args) throws InterruptedException, IOException {
@@ -46,10 +51,19 @@ public class Main {
         Class<? extends SocketChannel> clientChannelClass = useEpoll ? EpollSocketChannel.class : NioSocketChannel.class;
         Class<? extends DatagramChannel> datagramChannelClass = useEpoll ? EpollDatagramChannel.class : NioDatagramChannel.class;
 
+        Supplier<EvictionStore<CachedResponse>> storeFactory;
+
         final GatewayConfig config = GatewayConfig.defaults();
+        if (config.cachePolicy().equalsIgnoreCase("lru")) {
+            storeFactory = LruStore::new;
+        } else if (config.cachePolicy().equalsIgnoreCase("lfu")) {
+            storeFactory = LfuStore::new;
+        } else {
+            throw new IllegalArgumentException("Unknown cachePolicy: " + config.cachePolicy() + " (expected \"LRU\" or \"LFU\")");
+        }
         final EventLoopGroup boss = new MultiThreadIoEventLoopGroup(2, ioHandlerFactory);
         final EventLoopGroup worker = new MultiThreadIoEventLoopGroup(ioHandlerFactory);
-        final StripedResponseCache cache = new StripedResponseCache(config.cacheMaxBytes(), config.cacheMaxEntries());
+        final StripedResponseCache cache = new StripedResponseCache(config.cacheMaxBytes(), config.cacheMaxEntries(), storeFactory);
         final PrometheusMeterRegistry registry = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
         final HealthChecker healthChecker = new HealthChecker(new CopyOnWriteArrayList<>(), worker, clientChannelClass);
         final Router router = new Router(new ConcurrentHashMap<>());
@@ -74,7 +88,7 @@ public class Main {
                 config.discoveryStatePrefix(),
                 AddDiscoveryRequest.class
         );
-        final BackendRegistry beRegistry = new BackendRegistry(router, manager, healthChecker, registry);
+        final BackendRegistry beRegistry = new BackendRegistry(router, manager, healthChecker, registry, config);
         final DiscoveryRegistry discoveryRegistry = new DiscoveryRegistry(router, worker, datagramChannelClass, beRegistry);
         final BackendStatePersister beStatePersister = new BackendStatePersister(router, beStateStore, beRegistry, config,registry);
         final DiscoveryStatePersister discoveryStatePersister = new DiscoveryStatePersister(discoveryRegistry, discoveryStateStore, config, registry);

@@ -11,12 +11,7 @@ public abstract class LoadBalancingStrategy {
 
     public static final Logger log = LoggerFactory.getLogger(LoadBalancingStrategy.class);
 
-    // Callers (RequestForwarder) log selection failures with full request context
-    // (method/uri) -- logging here too would either duplicate that (pool empty /
-    // no healthy backend) or be misleading (this class can't tell "no healthy
-    // backend" apart from "circuit breaker rejected the pick" once collapsed to a
-    // single null return, so it doesn't try).
-    public final Backend select(List<Backend> backends, Set<Backend> excluded) {
+    public final Backend select(List<Backend> backends, Set<Backend> excluded, String clientIp, String uri) {
         if (isEmpty(backends)) {
             return null;
         } else {
@@ -32,7 +27,7 @@ public abstract class LoadBalancingStrategy {
             if (isEmpty(healthyBackends)) {
                 return null;
             }
-            Backend chosen =  doSelect(healthyBackends);
+            Backend chosen =  doSelect(healthyBackends, clientIp, uri);
             if (chosen != null && !chosen.getBreaker().allowRequest()) {
                 return null;
             }
@@ -41,7 +36,11 @@ public abstract class LoadBalancingStrategy {
         }
     }
 
-    protected abstract Backend doSelect(List<Backend> backends);
+    protected abstract Backend doSelect(List<Backend> backends, String clientIp, String uri);
+
+    void onBackendAdded(Backend be) {}
+
+    void onBackendRemoved(Backend be) {}
 
     private boolean isEmpty(List<Backend> list) {return list.isEmpty();}
 }

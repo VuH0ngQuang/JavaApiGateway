@@ -169,7 +169,7 @@ public class RequestForwarder {
             return;
         }
 
-        Backend backend = pool.select(triedBackend);
+        Backend backend = pool.select(triedBackend, clientIp, msg.uri());
         triedBackend.add(backend);
 
         if (pool.size() == triedBackend.size()) {
@@ -255,6 +255,12 @@ public class RequestForwarder {
                         if (backendMsg instanceof HttpContent content) {
                             if (byteBuf != null) {
                                 byteBuf.writeBytes(content.content().duplicate());
+                                if (byteBuf.readableBytes() > cache.maxBytes()) {
+                                    log.warn("Response for {} {} exceeded cache.maxBytes() ({} bytes), skipping cache for this response",
+                                            method, uri, cache.maxBytes());
+                                    byteBuf.release();
+                                    byteBuf = null;
+                                }
                             }
                             ctx.writeAndFlush(content);
                             if (backendMsg instanceof LastHttpContent) {
@@ -336,7 +342,7 @@ public class RequestForwarder {
         final HttpMethod method = headers.method();
         final String uri = headers.uri();
 
-        Backend be = pool.select(new HashSet<>());
+        Backend be = pool.select(new HashSet<>(), clientIp, headers.uri());
         if (be == null) {
             log.error("x- Failed to reach backend for {} {}: no eligible backend (pool empty, all unhealthy, or circuit open)", method, uri);
             sendError(ctx, headers.protocolVersion(), HttpResponseStatus.SERVICE_UNAVAILABLE);

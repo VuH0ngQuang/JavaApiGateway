@@ -32,7 +32,9 @@ class LoadBalancingStrategyTest {
 
         Backend result = strategy.select(
                 List.of(healthy, unhealthy, excluded),
-                Set.of(excluded)
+                Set.of(excluded),
+                "127.0.0.1",
+                "/test"
         );
 
         assertSame(healthy, result);
@@ -41,7 +43,7 @@ class LoadBalancingStrategyTest {
     @Test
     void select_returnsNullWhenPoolEmpty() {
         RoundRobinStrategy strategy = new RoundRobinStrategy();
-        Backend result = strategy.select(List.of(), Set.of());
+        Backend result = strategy.select(List.of(), Set.of(), "127.0.0.1", "/test");
 
         assertNull(result);
     }
@@ -52,7 +54,7 @@ class LoadBalancingStrategyTest {
         RoundRobinStrategy strategy = new RoundRobinStrategy();
 
         assertEquals(0, backend.activeConnections());
-        strategy.select(List.of(backend), Set.of());
+        strategy.select(List.of(backend), Set.of(), "127.0.0.1", "/test");
         assertEquals(1, backend.activeConnections());
     }
 }

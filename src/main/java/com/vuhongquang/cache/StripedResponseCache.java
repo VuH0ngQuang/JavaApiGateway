@@ -1,5 +1,6 @@
 package com.vuhongquang.cache;
 
+import com.vuhongquang.cache.striped.EvictionStore;
 import com.vuhongquang.cache.striped.LruStore;
 import com.vuhongquang.cache.striped.StripedCache;
 import io.netty.handler.codec.http.HttpHeaders;
@@ -9,6 +10,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.Objects;
 import java.util.concurrent.atomic.LongAdder;
+import java.util.function.Supplier;
 
 public class StripedResponseCache implements ResponseCache {
     private static final Logger log = LoggerFactory.getLogger(StripedResponseCache.class);
@@ -19,11 +21,11 @@ public class StripedResponseCache implements ResponseCache {
     private final LongAdder hits = new LongAdder();
     private final LongAdder misses = new LongAdder();
 
-    public StripedResponseCache(long maxBytes, long ttlMs) {
+    public StripedResponseCache(long maxBytes, long ttlMs, Supplier<EvictionStore<CachedResponse>> storeFactory) {
         this.ttlMS = ttlMs;
         this.maxBytes = maxBytes;
         if (maxBytes != 0) {
-            this.cache = new StripedCache<>(Runtime.getRuntime().availableProcessors(), maxBytes, LruStore::new, response -> response.body().length);
+            this.cache = new StripedCache<>(Runtime.getRuntime().availableProcessors(), maxBytes, storeFactory, response -> response.body().length);
         } else {
             this.cache = null;
         }

@@ -16,7 +16,9 @@ public record GatewayConfig(
         int maxContentLength,
         int maxRetryPersister,
         String backendStatePrefix,
-        String discoveryStatePrefix
+        String discoveryStatePrefix,
+        String cachePolicy,
+        int virtualNode
 ) {
     public static GatewayConfig defaults() {
         return new GatewayConfig(
@@ -35,7 +37,9 @@ public record GatewayConfig(
                 64 * 1024 * 1024,
                 3,
                 "gateway-backends",
-                "gateway-discovery"
+                "gateway-discovery",
+                "LRU",
+                150
         );
     }
 }

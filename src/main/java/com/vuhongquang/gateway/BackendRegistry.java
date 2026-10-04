@@ -1,13 +1,11 @@
 package com.vuhongquang.gateway;
 
+import com.vuhongquang.GatewayConfig;
 import com.vuhongquang.gateway.request.AddBackendRequest;
 import com.vuhongquang.gateway.request.DeleteBackendRequest;
 import com.vuhongquang.gateway.request.PatchBackendRequest;
 import com.vuhongquang.health.HealthChecker;
-import com.vuhongquang.loadbalancer.Backend;
-import com.vuhongquang.loadbalancer.BackendPool;
-import com.vuhongquang.loadbalancer.LoadBalancingStrategy;
-import com.vuhongquang.loadbalancer.StrategyType;
+import com.vuhongquang.loadbalancer.*;
 import com.vuhongquang.pool.ConnectionPoolManager;
 import com.vuhongquang.resilience.CircuitBreaker;
 import com.vuhongquang.routing.Router;
@@ -27,12 +25,14 @@ public class BackendRegistry {
     private final ConnectionPoolManager poolManager;
     private final HealthChecker healthChecker;
     private final PrometheusMeterRegistry registry;
+    private final GatewayConfig config;
 
-    public BackendRegistry(Router router, ConnectionPoolManager poolManager, HealthChecker healthChecker, PrometheusMeterRegistry registry) {
+    public BackendRegistry(Router router, ConnectionPoolManager poolManager, HealthChecker healthChecker, PrometheusMeterRegistry registry, GatewayConfig config) {
         this.router = router;
         this.poolManager = poolManager;
         this.healthChecker = healthChecker;
         this.registry = registry;
+        this.config = config;
     }
 
     public void registerBackend(AddBackendRequest beReq) {
@@ -46,7 +46,8 @@ public class BackendRegistry {
             if (strategy.isEmpty()) {
                 throw new IllegalArgumentException("unknown strategy id: " + beReq.strategy());
             }
-            backendPool = createNewPool(route, strategy.get().create(), beReq.forceStream());
+            ConsistentHashStrategy.KeyType keyType = beReq.hashKeyType() == null ? ConsistentHashStrategy.KeyType.CLIENT_IP : ConsistentHashStrategy.KeyType.valueOf(beReq.hashKeyType());
+            backendPool = createNewPool(route, strategy.get().create(keyType, config), beReq.forceStream());
         }
         Backend be = new Backend(
                 new InetSocketAddress(beReq.host(), beReq.port()),
@@ -66,7 +67,9 @@ public class BackendRegistry {
         BackendPool backendPool = router.getExact(route);
         if (backendPool == null) throw new NoSuchElementException("route not found: " + route);
         Optional<Backend> beOpt = backendPool.findByAddress(id);
-        if (beOpt.isEmpty()) throw new NoSuchElementException("backend not found: " + id + " on route " + route);
+        if (beOpt.isEmpty()) {
+            throw new NoSuchElementException("backend not found: " + id + " on route " + route);
+        }
 
         Backend be = beOpt.get();
         backendPool.removeBackend(be);

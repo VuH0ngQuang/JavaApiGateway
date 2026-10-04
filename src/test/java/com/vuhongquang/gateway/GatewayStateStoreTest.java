@@ -27,7 +27,8 @@ class GatewayStateStoreTest {
                         10,
                         20,
                         0,
-                        true
+                        true,
+                        null
                 )
         );
 

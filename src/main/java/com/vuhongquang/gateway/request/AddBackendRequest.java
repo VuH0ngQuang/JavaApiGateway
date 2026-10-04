@@ -11,7 +11,8 @@ public record AddBackendRequest(
         int minimumCalls,
         int windowSize,
         int strategy, // 0: least_connections    1: round_robin
-        boolean forceStream
+        boolean forceStream,
+        String hashKeyType
 ) {
     public AddBackendRequest {
         Objects.requireNonNull(route);

@@ -1,5 +1,6 @@
 package com.vuhongquang.cache;
 
+import com.vuhongquang.cache.striped.LruStore;
 import io.netty.handler.codec.http.DefaultHttpHeaders;
 import io.netty.handler.codec.http.HttpHeaders;
 import io.netty.handler.codec.http.HttpResponseStatus;
@@ -28,7 +29,7 @@ class StripedResponseCacheLoadTest {
     void concurrentGetPutStressTest() throws InterruptedException {
         long maxBytes = 10L * 1024 * 1024; // 10MB budget
         long ttlMs = 60_000;
-        StripedResponseCache cache = new StripedResponseCache(maxBytes, ttlMs);
+        StripedResponseCache cache = new StripedResponseCache(maxBytes, ttlMs, LruStore::new);
 
         int threadCount = 32;
         int opsPerThread = 50_000;

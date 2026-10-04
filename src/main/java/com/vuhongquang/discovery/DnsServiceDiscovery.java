@@ -71,7 +71,8 @@ public class DnsServiceDiscovery {
                             config.minimumCalls(),
                             config.windowSize(),
                             config.strategy(),
-                            config.forceStream()
+                            config.forceStream(),
+                            null
                     );
                     beRegistry.registerBackend(beReq);
                     log.info("Discovery added backend {}:{} to new route {}", address.getHostAddress(), config.port(), config.route());
@@ -100,7 +101,8 @@ public class DnsServiceDiscovery {
                         config.minimumCalls(),
                         config.windowSize(),
                         config.strategy(),
-                        config.forceStream()
+                        config.forceStream(),
+                        null
                 );
                 beRegistry.registerBackend(beReq);
                 log.info("Discovery added backend {}:{} to route {}", address.getHostAddress(), config.port(), config.route());

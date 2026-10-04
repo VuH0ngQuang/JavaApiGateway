@@ -2,10 +2,7 @@ package com.vuhongquang.gateway;
 
 import com.vuhongquang.GatewayConfig;
 import com.vuhongquang.gateway.request.AddBackendRequest;
-import com.vuhongquang.loadbalancer.Backend;
-import com.vuhongquang.loadbalancer.BackendPool;
-import com.vuhongquang.loadbalancer.LoadBalancingStrategy;
-import com.vuhongquang.loadbalancer.StrategyType;
+import com.vuhongquang.loadbalancer.*;
 import com.vuhongquang.resilience.CircuitBreaker;
 import com.vuhongquang.routing.Router;
 import io.micrometer.core.instrument.Counter;
@@ -93,19 +90,21 @@ public class BackendStatePersister {
             for (Backend be : backends) {
                 CircuitBreaker breaker = be.getBreaker();
                 LoadBalancingStrategy strategy = pool.strategy();
-                Optional<StrategyType> strategyId = StrategyType.fromStrategy(strategy);
+                Optional<StrategyType> strategyId = StrategyType.fromStrategy(strategy, config);
                 if (strategyId.isEmpty()) {
                     throw new IllegalStateException("Route " + route + " uses a LoadBalancingStrategy not registered in StrategyType: " + strategy.getClass());
                 }
+                String hashKeyType = strategy instanceof ConsistentHashStrategy chs ? chs.keyType().name() : null;
                 AddBackendRequest request = new AddBackendRequest(route,
-                        be.address().getHostName(),
+                        be.address().getHostString(),
                         be.address().getPort(),
                         breaker.openDurationMs(),
                         breaker.failureRateThreshold(),
                         breaker.minimumCalls(),
                         breaker.windowSize(),
                         strategyId.get().getId(),
-                        pool.isForceStream()
+                        pool.isForceStream(),
+                        hashKeyType
                 );
                 copyBackends.add(request);
             }

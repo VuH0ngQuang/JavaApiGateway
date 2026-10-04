@@ -23,20 +23,21 @@ public class BackendPool {
         this.forceStream = forceStream;
     }
 
-    public Backend select(Set<Backend> excluded) {
-        return strategy.select(backends, excluded);
+    public Backend select(Set<Backend> excluded, String clientIp, String uri) {
+        return strategy.select(backends, excluded, clientIp, uri);
     }
 
     public void addBackend(Backend be) {
         if (backends.contains(be)) {
             throw new IllegalArgumentException("Backend already exists in list: " + be.address());
         } else {
+            strategy.onBackendAdded(be);
             backends.add(be);
         }
     }
 
-    public Backend select() {
-        return strategy.select(backends, new HashSet<>());
+    public Backend select(String clientIp, String uri) {
+        return strategy.select(backends, new HashSet<>(), clientIp, uri);
     }
 
     public int size() {
@@ -60,6 +61,7 @@ public class BackendPool {
 
     public void removeBackend (Backend backend) {
         backends.remove(backend);
+        strategy.onBackendRemoved(backend);
     }
 
     public boolean isForceStream() {return forceStream;}

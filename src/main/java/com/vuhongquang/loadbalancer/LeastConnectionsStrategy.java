@@ -8,7 +8,7 @@ public class LeastConnectionsStrategy extends LoadBalancingStrategy{
     private final AtomicInteger index = new AtomicInteger(0);
 
     @Override
-    protected Backend doSelect(List<Backend> backends) {
+    protected Backend doSelect(List<Backend> backends, String clientIp, String uri) {
         int size = backends.size();
         int start = index.getAndIncrement() % size;
         Backend be = backends.get(start);
