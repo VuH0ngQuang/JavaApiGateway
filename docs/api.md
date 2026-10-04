@@ -9,6 +9,7 @@ traffic (`/api/*`), intercepted by `GatewayHandler` before the routing/proxy pat
 | `POST /gateway/backends` | Register a backend (new or existing route) |
 | `PATCH /gateway/backends/{id}` | Update a backend's `CircuitBreaker` config |
 | `DELETE /gateway/backends/{id}` | Remove a backend from pool, connection manager, and health checker |
+| `POST /gateway/discovery` | Register DNS-based service discovery for a route |
 
 ## `GET /gateway/metrics`
 
@@ -22,7 +23,7 @@ New `route` → creates a `BackendPool` with the given `strategy`. Existing `rou
 appends to that pool (rejects `500` on duplicate address).
 
 ```json
-{"route":"/api/movies","host":"localhost","port":8081,"openDurationMs":5000,"failureRateThreshold":0.5,"minimumCalls":10,"windowSize":20,"strategy":0}
+{"route":"/api/movies","host":"localhost","port":8081,"openDurationMs":5000,"failureRateThreshold":0.5,"minimumCalls":10,"windowSize":20,"strategy":0,"forceStream":false,"hashKeyType":null}
 ```
 
 | Field | Type | Meaning |
@@ -33,7 +34,11 @@ appends to that pool (rejects `500` on duplicate address).
 | `failureRateThreshold` | double `(0,1]` | Failure ratio that trips the breaker |
 | `minimumCalls` | int | Calls required in-window before threshold is evaluated |
 | `windowSize` | int | Breaker history size |
-| `strategy` | int | Only used on a brand-new route: `0` = Least Connections, `1` = Round Robin |
+| `strategy` | int | Only used on a brand-new route: `0` = Least Connections, `1` = Round Robin, `2` = Consistent Hashing |
+| `forceStream` | boolean | Only used on a brand-new route: stream the request body straight to the backend instead of buffering (see [`architecture.md`](architecture.md#forwarding-package)) |
+| `hashKeyType` | string, nullable | Only used on a brand-new route, only meaningful when `strategy` is `2`: `"CLIENT_IP"` or `"URI"` — which value the consistent-hash ring hashes on. Ignored (and persisted as `null`) for the other two strategies |
+
+`strategy`/`forceStream`/`hashKeyType` are only honored when this call **creates** the route's pool — appending a backend to an existing route ignores whatever you send for them, the same way `openDurationMs` etc. only set the *new* backend's own breaker.
 
 `200` created/appended · `400` malformed JSON / unknown strategy · `500` duplicate address / other failure
 
@@ -81,3 +86,34 @@ curl -X DELETE localhost:1221/gateway/backends/localhost:8081 -H 'Content-Type: 
 **Known limitation**: deleted-backend gauges go stale (`NaN`) instead of
 disappearing immediately — Micrometer holds a weak reference, only turns `NaN` once
 the `Backend` object is GC-eligible. Harmless for scraping/alerting.
+
+## `POST /gateway/discovery`
+
+Registers DNS-based discovery for a route: on an interval, resolves `hostname`
+and reconciles the route's backend pool against the result — adds newly-seen
+IPs, removes ones no longer present, leaves existing ones (and their live
+circuit-breaker/health state) untouched. One discovery registration per route;
+a duplicate `route` is rejected.
+
+```json
+{"hostname":"backend.internal","route":"/api/movies","pollIntervalMs":3000,"port":8081,"openDurationMs":5000,"failureRateThreshold":0.5,"minimumCalls":10,"windowSize":20,"strategy":0,"forceStream":false}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `hostname` | string | DNS name to resolve on each poll |
+| `route` | string | URI prefix to reconcile backends into |
+| `pollIntervalMs` | long | How often to re-resolve `hostname` |
+| `port` | int | Port every discovered backend is assumed to listen on |
+| `openDurationMs`, `failureRateThreshold`, `minimumCalls`, `windowSize` | — | Circuit-breaker config applied to each newly-discovered backend |
+| `strategy`, `forceStream` | — | Same meaning as [`POST /gateway/backends`](#post-gatewaybackends); only takes effect if discovery is the first thing to create the route's pool |
+
+`200` registered · `400` malformed JSON / duplicate route · `500` other failure
+
+```bash
+curl -X POST localhost:1221/gateway/discovery -H 'Content-Type: application/json' \
+  -d '{"hostname":"backend.internal","route":"/api/movies","pollIntervalMs":3000,"port":8081,"openDurationMs":5000,"failureRateThreshold":0.5,"minimumCalls":10,"windowSize":20,"strategy":0,"forceStream":false}'
+```
+
+Discovery config survives a restart (persisted the same way backends are) and
+resumes polling/reconciling automatically on boot — no re-registration needed.

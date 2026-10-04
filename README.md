@@ -10,8 +10,17 @@ distributed systems, and observability by building rather than reading about the
   Connections** load balancing, and **active TCP health checks** every 5s.
 - **Connection pooling** (keep-alive reuse, waiter queue, acquire timeout) measured at
   **17.8× throughput** over opening a connection per request.
-- **LRU response cache**, byte-budgeted, measured at **4.8×** the hit rate under skewed
-  (Zipf) access versus uniform, on the same cache.
+- **Striped response cache**, byte-budgeted, policy-selectable (**LRU** or **LFU** via
+  `GatewayConfig.cachePolicy`) — measured at **4.8×** the hit rate under skewed (Zipf)
+  access versus uniform, on the same cache. Replaced an earlier single-lock design;
+  JFR-verified zero lock contention under live concurrent multi-key load.
+- **Consistent-hash load balancing**, selectable per route alongside Round Robin /
+  Least Connections, hashing on either client IP or request URI — a virtual-node ring
+  means adding or removing one backend remaps only that backend's share of keys, not
+  a full reshuffle (measured ~1/N keys moved on both add and remove).
+- **DNS-based service discovery** — resolves a hostname on a poll interval and
+  reconciles a route's backend pool against the result (add new, remove gone, leave
+  existing backends' live state untouched), survives restarts.
 - **Rate limiting** behind one interface with two interchangeable implementations —
   token bucket (bursty) and sliding window (hard ceiling) — same configured rate,
   deliberately different behaviour under a burst.
@@ -23,7 +32,10 @@ distributed systems, and observability by building rather than reading about the
   runtime through an admin API; `Main` boots with zero hardcoded backends. **Survives
   restarts** — every mutation writes a timestamped snapshot to disk, and the latest one
   is auto-replayed on boot (falling back to the next-newest if the latest is corrupt from
-  a crash mid-write).
+  a crash mid-write). The admin-side `BackendGatewayService` is now pure HTTP glue over
+  a set of ctx-free registries/persisters (`BackendRegistry`, `DiscoveryRegistry`,
+  `BackendStatePersister`, `DiscoveryStatePersister`) — the same registries the DNS
+  discovery poller calls directly, with no HTTP involved.
 - **Performance-tuned request path** — native Epoll transport (falls back to NIO off
   Linux), response-body streaming (no full-response buffering, with backpressure so a
   slow client can't grow the gateway's memory unbounded), and a lock-free rate limiter
@@ -42,7 +54,7 @@ Details are split out rather than kept in one file — see the table below.
 | Doc | Covers |
 |---|---|
 | [`docs/architecture.md`](docs/architecture.md) | Every package, what it owns, and why it's shaped the way it is |
-| [`docs/api.md`](docs/api.md) | The `/gateway/*` admin API — add/patch/delete backends, metrics |
+| [`docs/api.md`](docs/api.md) | The `/gateway/*` admin API — add/patch/delete backends, DNS discovery, metrics |
 | [`docs/observability.md`](docs/observability.md) | What each metric means and the bugs that shaped them |
 | [`docs/performance.md`](docs/performance.md) | Full benchmark numbers, charts, and methodology |
 | [`target.md`](target.md) | The 12-week roadmap this project follows |
@@ -65,6 +77,12 @@ Through **Week 12** — the full 12-week roadmap is complete.
 | 10 | Dynamic Configuration (admin API — add/patch/delete backends & routes) | ✅ |
 | 11 | Performance Optimization (Epoll, streaming, lock-free rate limit/circuit breaker) | ✅ |
 | 12 | Production Ready (Docker, CI/CD, docs, unit tests) | ✅ |
+
+Past Week 12, work has continued on the roadmap's stretch goals: DNS-based
+service discovery, Consistent Hashing, LFU response cache, and the striped
+(multi-segment-lock) cache rewrite are all done — see
+[`target.md`](target.md#stretch-goals) for the full stretch-goal list and
+status.
 
 ## Running
 
